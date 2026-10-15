@@ -1,44 +1,80 @@
 # SAGE
 
-Industrial Automation project for the John Deere challenge.
+SAGE is an Industrial Automation project for the John Deere challenge.
+This repository contains STM32 firmware for DC motor control and encoder measurement.
 
-## DC motor control and encoder reading
+## Firmware
 
-The initial firmware project is in `Interrup_econder/`, imported from the team's original project archive. It targets the **NUCLEO-H533RE (STM32H533RET6)** and includes motor PWM control, encoder edge counting, RPM calculation, a duty-cycle ramp, and stall detection.
+The `Interrup_econder/` project uses the NUCLEO-H533RE board with the STM32H533RET6 microcontroller.
+The firmware provides these functions:
+
+- Motor speed and direction control through pulse-width modulation (PWM) and two digital outputs.
+- Encoder pulse counts through interrupts on both edges of channel A, with channel B for direction detection.
+- Output shaft speed calculation in revolutions per minute (RPM), with a nominal sample interval of 100 ms.
+- A duty cycle sequence of 30, 60, 100, 0, −60, and 0 percent, with 10 seconds per step.
+- A duty cycle ramp of one percentage point per 20 ms.
+- Motor stop after three samples without encoder counts, when the duty cycle magnitude is at least 30 percent.
 
 ## Project files
 
-- `Interrup_econder/Core/Src/main.c`: application logic.
-- `Interrup_econder/Core/Inc/`: application headers.
-- `Interrup_econder/Drivers/`: STM32 HAL, CMSIS, and board drivers.
-- `Interrup_econder/Interrup_econder.ioc`: STM32CubeMX configuration.
-- `Interrup_econder/CMakePresets.json`: Debug and Release build presets.
-- `Interrup_econder/.vscode/` and `.settings/`: supplied editor and STM32 tool configuration.
+All paths below are relative to `Interrup_econder/`.
 
-## Open the firmware
+| Path | Contents |
+| --- | --- |
+| `Core/Src/main.c` | Motor control, encoder measurement, and speed calculation |
+| `Core/Inc/` | Application headers |
+| `Drivers/` | STM32 HAL, CMSIS, and board drivers |
+| `Interrup_econder.ioc` | STM32CubeMX configuration |
+| `CMakePresets.json` | Debug and Release build presets |
+| `.vscode/`, `.settings/` | Editor settings and STM32 tool configuration |
 
-In VS Code, choose **File > Open Folder** and select `Interrup_econder` inside this repository. This folder contains the CMake project and supplied VS Code configuration. Building and debugging require the STM32 tools referenced in that configuration. Build output is generated locally under `Interrup_econder/build/` and is excluded from Git.
+## Open the project
 
-## Work with branches
+1. Open VS Code.
+2. Select **File > Open Folder**.
+3. Select the `Interrup_econder` folder in this repository.
 
-From the repository folder, create a branch before making a change:
+The supplied configuration requires STM32 tools for compilation and debugging.
+Git excludes the generated files in `Interrup_econder/build/`.
 
-```sh
-git switch -c feature/your-change
-```
+## Make a change
 
-After editing, review and commit your changes, then upload the branch:
+1. From the repository folder, create a branch:
 
-```sh
-git status
-git diff
-git add <files-you-changed>
-git commit -m "Describe your change"
-git push -u origin feature/your-change
-```
+   ```sh
+   git switch -c feature/your-change
+   ```
 
-Open a pull request on GitHub to review and merge the branch into `main`.
+2. Make the necessary changes.
+3. Examine the changes:
 
-## Initial import validation
+   ```sh
+   git status
+   git diff
+   ```
 
-The firmware source is preserved from the supplied archive, and the imported CMake source and include paths were checked for missing files. Compilation and hardware operation have not been verified as part of this import.
+4. Stage the applicable files. Replace `<file-path>` with each file path:
+
+   ```sh
+   git add <file-path>
+   ```
+
+5. Commit the changes:
+
+   ```sh
+   git commit -m "Describe the change"
+   ```
+
+6. Push the branch to GitHub:
+
+   ```sh
+   git push -u origin feature/your-change
+   ```
+
+7. Open a pull request for review before you merge the branch into `main`.
+
+## Verification status
+
+The imported firmware files match the supplied archive.
+All source files and include directories referenced by the generated CMake configuration are present.
+Compilation and hardware operation remain unverified.
