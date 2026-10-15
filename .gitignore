@@ -53,3 +53,15 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# STM32 build output and local caches
+**/build/
+**/Debug/
+**/Release/
+.cache/
+compile_commands.json
+CMakeUserPresets.json
+
+# macOS metadata
+.DS_Store
+__MACOSX/
