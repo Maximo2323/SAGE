@@ -10,13 +10,13 @@
 #define CONSTANTS_H
 
 /* --- Timing --- */
-#define WHEEL_CONTROL_PERIOD_MS     10U    /* encoder sample and wheel PI: 100 Hz          */
+#define WHEEL_CONTROL_PERIOD_MS     10U    /* encoder sample and wheel PI: 100 Hz.
+                                              main.c sets the TIM6 period from this value. */
 #define WHEEL_CONTROL_DT_S          ((float)WHEEL_CONTROL_PERIOD_MS / 1000.0f)
 #define STEERING_CONTROL_PERIOD_MS  20U    /* heading and steering control: 50 Hz          */
 #define TELEMETRY_PERIOD_MS         100U   /* telemetry: 10 Hz                             */
-#define MOTOR_PWM_HZ                20000U /* TIM8: 32 MHz / 1600. To change it, change TIM8 in CubeMX.
+#define MOTOR_PWM_HZ                20000U /* main.c sets the TIM8 period from this value.
                                               The BTS7960 data sheet permits 25 kHz maximum. */
-#define SERVO_PWM_HZ                50U    /* TBD: confirm with the servo data             */
 
 /* --- Timeouts, in elapsed milliseconds --- */
 #define STALL_TIMEOUT_MS            300U   /* high duty cycle and no encoder counts        */
@@ -94,7 +94,6 @@
 #define HEADING_KI                  0.0f   /* ===== TBD ===== */
 #define HEADING_KD                  0.0f   /* ===== TBD ===== */
 
-#define HEADING_JUMP_DEG          20.0f   /* TBD */
 #define HEADING_CAL_SAMPLES       80
 #define HEADING_CAL_WARMUP_MS     2000U
 #define HEADING_MAX_SAMPLES       128
