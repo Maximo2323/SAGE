@@ -4,7 +4,8 @@
  * CubeMX owns them: change them in John_Deere_Tractor.ioc, then generate code.
  * CubeMX then writes the new pins in Core/Inc/main.h.
  *
- * After a timer change here, make the same change in CubeMX. The two must agree. */
+ * After a timer change here, make the same change in CubeMX. The two must agree.
+ * Exception: main.c sets the periods of TIM6 and TIM8 from constants.h. */
 #ifndef PINS_H
 #define PINS_H
 
@@ -16,7 +17,7 @@ extern TIM_HandleTypeDef htim3;
 extern TIM_HandleTypeDef htim6;
 extern TIM_HandleTypeDef htim8;
 
-/* Motor PWM: TIM8 at MOTOR_PWM_HZ. Left = PC6 (RPWM), PC7 (LPWM). Right = PC8 (RPWM), PC9 (LPWM). */
+/* Motor PWM: TIM8 at MOTOR_PWM_HZ (see constants.h). Left = PC6 (RPWM), PC7 (LPWM). Right = PC8 (RPWM), PC9 (LPWM). */
 #define MOTOR_PWM_TIM       htim8
 #define MOTOR_L_FWD_CH      TIM_CHANNEL_1
 #define MOTOR_L_REV_CH      TIM_CHANNEL_2
@@ -32,7 +33,8 @@ extern TIM_HandleTypeDef htim8;
 /* Encoder sample: one TIM6 interrupt each WHEEL_CONTROL_PERIOD_MS */
 #define ENC_SAMPLE_TIM      htim6
 
-/* Steering servo: TIM1 channel 1 on PA8, 1 MHz tick, SERVO_PWM_HZ */
+/* Steering servo: TIM1 channel 1 on PA8, 1 MHz tick, 50 Hz (set in CubeMX).
+ * TBD: confirm the frequency with the servo data. */
 #define SERVO_TIM           htim1
 #define SERVO_CHANNEL       TIM_CHANNEL_1
 
