@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tractor · live console</title>
+<style>
+:root{color-scheme:dark;font:14px ui-monospace,SFMono-Regular,monospace;color:#c6d9cc;background:#080c0a}*{box-sizing:border-box}body{margin:0}header{padding:24px 30px;border-bottom:1px solid #24372b;display:flex;justify-content:space-between;gap:20px;align-items:center}h1{font-size:19px;letter-spacing:.1em;margin:0;color:#e9f4eb}.eyebrow{font-size:10px;letter-spacing:.2em;color:#72ad84;margin-bottom:9px}.badge{color:#b9ed87;border:1px solid #516c38;border-radius:4px;padding:8px}main{display:grid;grid-template-columns:1fr 310px;min-height:calc(100vh - 91px)}.scene{position:relative;min-height:570px;border-right:1px solid #24372b}canvas{display:block;width:100%;height:100%;position:absolute}.legend{position:absolute;top:24px;left:24px;right:24px;pointer-events:none}.legend p{max-width:560px;color:#8b9c90;font:12px/1.6 system-ui}.bottom{position:absolute;bottom:20px;left:24px;color:#7b9884;font-size:11px}aside{padding:24px}h2{font-size:11px;letter-spacing:.15em;color:#7eaa8b;margin:0 0 18px}.row{display:flex;justify-content:space-between;gap:10px;padding:11px 0;border-bottom:1px solid #1a2a20}.row b{color:#dcf4df;font-weight:500}section{margin-bottom:30px}button,select{font:inherit;color:#ccead3;background:#132119;border:1px solid #34513e;border-radius:4px;padding:10px;cursor:pointer}button:focus-visible,select:focus-visible{outline:2px solid #a3ff99}button:active{background:#365a36}.keys{display:grid;grid-template-columns:repeat(3,1fr);gap:7px;margin:14px 0}.keys button{touch-action:none;user-select:none}.keys button:first-child{grid-column:2}.keys button:nth-child(2){grid-column:1}.stop{width:100%;color:#ffd4ac;border-color:#805b36;background:#2b2116}small{display:block;font:12px/1.6 system-ui;color:#899b8e;margin-top:12px}#flags{color:#ffbf81;min-height:18px}#raw{font-size:10px;line-height:1.6;color:#779581;overflow-wrap:anywhere}select{width:100%}@media(max-width:760px){main{grid-template-columns:1fr}.scene{height:520px;min-height:0;border-right:0}header{padding:20px}aside{border-top:1px solid #24372b}.badge{font-size:10px}}
+
+.mode-controls{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.mode-controls button{padding:7px 11px;font-size:12px}.mode-controls button[aria-pressed="true"]{background:#365a36;border-color:#9ede7f}.badge{font-size:11px;white-space:nowrap;border:0;padding:5px}.badge::before{content:'●';color:#6d7c71;margin-right:6px}.badge.live::before{color:#a5ff75;animation:livepulse 1s infinite}.keys button.pressed,.stop.pressed{background:#526d36;border-color:#c1ff9d;box-shadow:0 0 0 1px #9ede7f}.stop.pressed{background:#77532c}@keyframes livepulse{50%{opacity:.25}}#controlError{color:#ffb983}button:disabled{opacity:.45;cursor:not-allowed}
+</style>
+<header><div><div class="eyebrow">JOHN DEERE / STM32H533</div><h1>TRACTOR CONSOLE</h1></div><div class="mode-controls"><button id="simMode" aria-pressed="false">Sim</button><button id="liveMode" aria-pressed="false">Live</button><span class="badge" id="mode" role="status">CONNECTING</span></div></header>
+<main><div class="scene"><canvas id="map" aria-label="Top view of green tractor, front steering and rear wheel trails"></canvas><div class="legend"><div id="poseLabel">Waiting for data</div><p id="poseNote"></p></div><div class="bottom">● LEFT / RIGHT DISTANCE · unavailable in firmware telemetry</div></div>
+<aside><section><h2 id="telemetryTitle">01 / TELEMETRY</h2><div id="status">Waiting…</div><div class="row"><span>Target</span><b id="target">—</b></div><div class="row"><span>Wheel L / R</span><b id="rpm">—</b></div><div class="row"><span>Command L / R</span><b id="cmd">—</b></div><div class="row"><span>Steer command</span><b id="steer">—</b></div><div class="row"><span>Game / RV yaw</span><b id="yaw">—</b></div><div class="row"><span>Reset / overrun</span><b id="counts">—</b></div><small id="flags"></small></section>
+<section><h2>02 / DRIVE</h2><small id="controlError" role="alert"></small><label for="speed">Speed target</label><select id="speed"><option value="1">10% · 20 RPM</option><option value="2">20% · 40 RPM</option><option value="3">30% · 60 RPM</option><option value="4">40% · 80 RPM</option><option value="5">50% · 100 RPM</option><option value="6">60% · 120 RPM</option><option value="7">70% · 140 RPM</option><option value="8">80% · 160 RPM</option><option value="9">90% · 180 RPM</option><option value="0">100% · 200 RPM</option></select><div class="keys"><button data-key="w">W ↑</button><button data-key="a">A ↶</button><button data-key="s">S ↓</button><button data-key="d">D ↷</button></div><button class="stop" id="stop">SPACE · STOP + CENTER</button><small>Hold W / S to drive. A / D steps steering 5° per press. Releasing drive sends Space: zero output, center steering, clear stall. Physical motion may coast.</small></section>
+<section><h2>03 / DATA SOURCE</h2><div id="raw">No frame received</div><small>Steering is a command, not a measured wheel angle. No measured X/Y position or sensor ranges are transmitted.</small></section></aside></main>
+<script>
+const $=id=>document.getElementById(id), canvas=$('map'),ctx=canvas.getContext('2d');
+let snap=null, held=new Set(), pending=false, sending=null, stopPending=false, spaceHeld=false, switching=false;
+function paintKeys(){for(const b of document.querySelectorAll('[data-key]'))b.classList.toggle('pressed',held.has(b.dataset.key));$('stop').classList.toggle('pressed',spaceHeld);}
+function current(){return {drive:held.has('w')&&!held.has('s')?'w':held.has('s')&&!held.has('w')?'s':'',turn:held.has('a')&&!held.has('d')?'a':held.has('d')&&!held.has('a')?'d':'',speed:$('speed').value,stop:false,generation:snap?.generation};}
+async function post(path,body){const r=await fetch(path,{method:'POST',headers:{'Content-Type':'application/json','X-Control-Token':'__TOKEN__'},body:JSON.stringify(body),signal:AbortSignal.timeout(800)});const result=await r.json();if(!r.ok)throw Error(result.error);return result;}
+function transmit(){
+  if(!snap||switching)return Promise.resolve();
+  pending=true;
+  if(sending)return sending;
+  sending=(async()=>{
+    try{while(pending||stopPending){pending=false;let state=current();if(stopPending){state.drive=state.turn='';state.stop=true;stopPending=false;}await post('/control',state);} $('controlError').textContent='';}
+    catch(e){held.clear();spaceHeld=false;pending=stopPending=false;paintKeys();$('controlError').textContent=e.message;}
+  })().finally(()=>{sending=null;});
+  return sending;
+}
+function stop(){held.clear();stopPending=true;paintKeys();return transmit();}
+function press(key){if(switching||spaceHeld||held.has(key))return;held.add(key);paintKeys();transmit();}
+function release(key){if(!held.has(key))return;held.delete(key);if(key==='w'||key==='s')stop();else{paintKeys();transmit();}}
+function controlKey(e){if(e.code==='Space')return ' ';const letter=/^Key([WASD])$/.exec(e.code);if(letter)return letter[1].toLowerCase();const digit=/^(?:Digit|Numpad)([0-9])$/.exec(e.code);return digit?digit[1]:null;}
+window.addEventListener('keydown',e=>{const k=controlKey(e);if(k===null||e.metaKey||e.ctrlKey||e.altKey)return;e.preventDefault();e.stopPropagation();if(e.repeat||switching)return;if(k===' '){spaceHeld=true;stop();}else if(/^[0-9]$/.test(k)){$('speed').value=k;transmit();}else press(k);},true);
+window.addEventListener('keyup',e=>{const k=controlKey(e);if(k===null)return;e.preventDefault();e.stopPropagation();if(k===' '){spaceHeld=false;paintKeys();}else if('wasd'.includes(k))release(k);},true);
+function loseFocus(){spaceHeld=false;stop();}
+window.addEventListener('blur',loseFocus);document.addEventListener('visibilitychange',()=>{if(document.hidden)loseFocus();});
+for(const b of document.querySelectorAll('[data-key]')){b.addEventListener('pointerdown',e=>{e.preventDefault();b.setPointerCapture(e.pointerId);press(b.dataset.key);});b.addEventListener('pointerup',()=>release(b.dataset.key));b.addEventListener('pointercancel',loseFocus);}
+$('stop').onpointerdown=e=>{e.preventDefault();$('stop').setPointerCapture(e.pointerId);spaceHeld=true;stop();};$('stop').onpointerup=()=>{spaceHeld=false;paintKeys();};$('stop').onpointercancel=loseFocus;
+$('stop').onclick=()=>stop();$('speed').onchange=()=>{transmit();$('speed').blur();};
+setInterval(()=>{if(held.size&&!switching)transmit();},80);
+async function changeMode(mode){
+  if(switching)return;
+  switching=true;spaceHeld=false;held.clear();pending=stopPending=false;paintKeys();
+  if(sending)await sending;
+  try{if(snap)await post('/control',{...current(),drive:'',turn:'',stop:true});}catch(e){/* Still allow leaving a disconnected live session. */}
+  try{await post('/mode',{mode});snap=await (await fetch('/state')).json();$('speed').value='1';$('controlError').textContent='';render();}
+  catch(e){$('controlError').textContent=e.message;}
+  finally{switching=false;}
+}
+$('simMode').onclick=()=>changeMode('sim');$('liveMode').onclick=()=>changeMode('live');
+function render(){
+  const live=snap.mode==='SERIAL',fresh=live&&!snap.stale&&!snap.error;
+  $('mode').textContent=live?(fresh?'LIVE':'NO DATA'):'SIM';$('mode').classList.toggle('live',fresh);
+  $('simMode').setAttribute('aria-pressed',String(!live));$('liveMode').setAttribute('aria-pressed',String(live));$('liveMode').disabled=!snap.live_available;
+  $('telemetryTitle').textContent=live?'01 / LIVE TELEMETRY':'01 / SIMULATED TELEMETRY';
+  $('status').textContent=snap.error||(snap.stale?'Waiting / stale data':(snap.age*1000).toFixed(0)+' ms since frame');
+  let d=snap.data;if(d){$('target').textContent=d.target+' rpm';$('rpm').textContent=d.rpm_left+' / '+d.rpm_right+' rpm';$('cmd').textContent=d.cmd_left+' / '+d.cmd_right+' %';$('steer').textContent=d.steer+'°';$('yaw').textContent=d.game_yaw+'° / '+d.rotation_yaw+'°';$('counts').textContent=d.resets+' / '+d.overruns;$('flags').textContent=d.flags.join(' · ');$('raw').textContent=JSON.stringify(d);}else{for(const id of ['target','rpm','cmd','steer','yaw','counts'])$(id).textContent='—';$('flags').textContent='';$('raw').textContent='No frame received';}
+$('poseLabel').textContent=snap.mode==='SIMULATION'?'SIMULATED TRAJECTORY':snap.geometry?(snap.placeholder_geometry?'PLACEHOLDER GEOMETRY · NOT CALIBRATED':'ESTIMATED ODOMETRY · NOT MEASURED POSE'):'LIVE SCHEMATIC · NO POSITION';$('poseNote').textContent=snap.mode==='SIMULATION'?'Synthetic telemetry. Illustrative 100 / 300 / 220 mm diameter, wheelbase and track. Hold W, then tap A or D.':snap.placeholder_geometry?'Real serial telemetry with illustrative 100 / 300 / 220 mm dimensions. Travel is uncalibrated; without encoders there is no valid distance estimate.':snap.geometry?'Travel inferred from wheel RPM and commanded steering using supplied dimensions. No slip correction; trails are estimates.':'Geometry is unset. Translation and trails are disabled. Valid Game yaw rotates the schematic; wheel angles show the steering command.';
+}
+async function poll(){try{const generation=snap?.generation;const r=await fetch('/state',{signal:AbortSignal.timeout(800)});const next=await r.json();if(!switching&&(snap?.generation===generation)){snap=next;render();}}catch(e){if(snap)snap.stale=true;$('status').textContent='Dashboard disconnected';$('mode').textContent='OFFLINE';$('mode').classList.remove('live');}finally{setTimeout(poll,100);}}
+function draw(){const box=canvas.getBoundingClientRect(),dpr=devicePixelRatio||1;canvas.width=box.width*dpr;canvas.height=box.height*dpr;ctx.scale(dpr,dpr);let w=box.width,h=box.height;ctx.fillStyle='#070c09';ctx.fillRect(0,0,w,h);ctx.strokeStyle='#14251a';ctx.lineWidth=1;for(let x=0;x<w;x+=30){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();}for(let y=0;y<h;y+=30){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(w,y);ctx.stroke();}
+const geo=snap?.geometry||[100,300,220],L=geo[1],T=geo[2],scale=120/L,pose=snap?.pose||[0,0,0];let yaw=snap?.geometry?pose[2]:(snap?.data&&!snap.stale&&!snap.data.flags.some(f=>f.startsWith('IMU'))?snap.data.game_yaw*Math.PI/180:0);
+ctx.save();ctx.translate(w/2,h*.57);function point(x,y){return [(x-pose[0])*scale,-(y-pose[1])*scale];}
+ctx.rotate(-Math.PI/2); // Forward starts toward the top of the grid.
+if(snap?.geometry){ctx.fillStyle='#547e42';for(let p of snap.trail){for(let side of [-1,1]){let x=p[0]-Math.sin(p[2])*side*T/2,y=p[1]+Math.cos(p[2])*side*T/2;let q=point(x,y);ctx.beginPath();ctx.arc(q[0],q[1],1.6,0,7);ctx.fill();}}}
+ctx.rotate(-yaw);ctx.fillStyle='#164b2b';ctx.strokeStyle='#8dda63';ctx.lineWidth=2;ctx.fillRect(-22,-T*scale*.34,164,T*scale*.68);ctx.strokeRect(-22,-T*scale*.34,164,T*scale*.68);ctx.fillStyle='#24683b';ctx.fillRect(35,-T*scale*.27,55,T*scale*.54);ctx.fillStyle='#b0db69';ctx.fillRect(98,-T*scale*.22,24,T*scale*.44);
+let delta=(snap?.data?.steer||0)*Math.PI/180;for(let front of [false,true])for(let side of [-1,1]){ctx.save();ctx.translate(front?120:0,side*T*scale/2);let angle=delta;if(snap?.geometry&&delta){const radius=L/Math.tan(delta);angle=Math.atan(L/(radius+side*T/2));}if(front)ctx.rotate(-angle);ctx.fillStyle='#0a100c';ctx.strokeStyle='#a5ba9d';ctx.fillRect(-20,-9,40,18);ctx.strokeRect(-20,-9,40,18);ctx.restore();}
+ctx.restore();requestAnimationFrame(draw);}
+poll();draw();
+</script></html>
