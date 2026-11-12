@@ -77,7 +77,12 @@ static int i2c_write(sh2_Hal_t *self, uint8_t *buf, unsigned len)
 static void async_handler(void *cookie, sh2_AsyncEvent_t *event)
 {
   /* Do not send commands to the sensor from this callback. bno085_update() does that. */
-  if (event->eventId == SH2_RESET) { ((Bno085 *)cookie)->reset_seen = true; }
+  if (event->eventId == SH2_RESET)
+  {
+    Bno085 *b = (Bno085 *)cookie;
+    b->reset_seen = true;
+    b->reset_count++;
+  }
 }
 
 static float quat_to_yaw_deg(float qi, float qj, float qk, float qr)
@@ -188,6 +193,7 @@ bool bno085_begin(Bno085 *b, I2C_HandleTypeDef *hi2c, uint8_t addr)
     if (!enable_reports()) { continue; }
 
     b->reset_seen  = false;  /* the reset at the start is normal */
+    b->reset_count = 0;
     b->initialized = true;
     return true;
   }
@@ -198,25 +204,15 @@ void bno085_update(Bno085 *b)
 {
   if (!b->initialized) { return; }
 
-  /* After a reset the sensor sends no reports. Enable them again. */
-  if (b->reset_seen)
-  {
-    b->reset_seen = false;
-    b->reset_count++;
-    enable_reports();
-  }
+  /* After a reset the sensor sends no reports. Enable them again.
+   * If the command fails, the flag stays and the next call tries again. */
+  if (b->reset_seen && enable_reports()) { b->reset_seen = false; }
 
   do
   {
     b->got_event = false;
     sh2_service();
   } while (b->got_event);
-}
-
-bool bno085_fresh(const Bno085 *b, int source, uint32_t now_ms)
-{
-  return b->initialized && b->count[source] != 0U
-      && (now_ms - b->t_ms[source]) < BNO_STALE_TIMEOUT_MS;
 }
 
 float bno085_relative_yaw(const Bno085 *b, int source)
