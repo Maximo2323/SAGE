@@ -97,7 +97,7 @@ static uint8_t     imu_ok = 0;      /* 1 = the BNO085 started and the heading ze
 static int32_t  drive_dir  = 0;     /* +1 = forward, -1 = reverse, 0 = stop       */
 static int32_t  speed_pct  = 10;    /* 10 to 100 % of WHEEL_SPEED_MAX_RPM         */
 static float    steer_deg  = 0.0f;  /* positive = left                            */
-static uint32_t t_last_key = 0;
+static uint32_t t_last_key = 0;     /* time of the last W or S key                */
 
 /* Wheel control state */
 static float    target_rpm = 0.0f;  /* vehicle speed target after the ramp        */
@@ -148,8 +148,9 @@ static void read_key(uint32_t now)
   const char key = (char)uart->RDR;
   switch (key)
   {
-    case 'w': case 'W': drive_dir = 1;  break;
-    case 's': case 'S': drive_dir = -1; break;
+    /* Hold-to-drive: only the two drive keys start the command timeout again. */
+    case 'w': case 'W': drive_dir = 1;  t_last_key = now; break;
+    case 's': case 'S': drive_dir = -1; t_last_key = now; break;
     case 'a': case 'A':
       if (heading_hold_active()) { heading_hold_add_to_target(&heading, HEADING_STEP_DEG); }
       else                       { steer_deg += STEER_STEP_DEG; }
@@ -173,8 +174,6 @@ static void read_key(uint32_t now)
       break;
   }
 
-  /* Hold-to-drive: each valid key starts the command timeout again. */
-  t_last_key = now;
   steer_deg  = clampf(steer_deg, -SERVO_MAX_STEER_DEG, SERVO_MAX_STEER_DEG);
   servo_set_deg(&servo, steer_deg);
 }
@@ -204,7 +203,11 @@ static float wheel_command(Pid *pid, float target, float measured, float dt_s)
     pid_reset(pid);
     return 0.0f;
   }
-  return clampf(WHEEL_FF_PCT_PER_RPM * target + pid_update(pid, target, measured, dt_s), -100.0f, 100.0f);
+  /* The PI gets only the part of the command range that the feedforward term leaves.
+   * Thus its anti-windup operates on the total command. */
+  const float ff = WHEEL_FF_PCT_PER_RPM * target;
+  pid_set_output_limits(pid, -100.0f - ff, 100.0f - ff);
+  return clampf(ff + pid_update(pid, target, measured, dt_s), -100.0f, 100.0f);
 }
 
 /* Stall condition: a high command and no encoder counts for STALL_TIMEOUT_MS. */
@@ -309,6 +312,10 @@ int main(void)
   MX_TIM3_Init();
   MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
+  /* MOTOR_PWM_HZ sets the motor PWM frequency. This replaces the period value from CubeMX.
+   * shortcut: correct only while the APB2 clock divider is 1 (timer clock = PCLK2). */
+  __HAL_TIM_SET_AUTORELOAD(&MOTOR_PWM_TIM,
+      HAL_RCC_GetPCLK2Freq() / (MOTOR_PWM_TIM.Init.Prescaler + 1U) / MOTOR_PWM_HZ - 1U);
   motor_init(&motor_l, &MOTOR_PWM_TIM, MOTOR_L_FWD_CH, MOTOR_L_REV_CH);
   motor_init(&motor_r, &MOTOR_PWM_TIM, MOTOR_R_FWD_CH, MOTOR_R_REV_CH);
   servo_init(&servo, &SERVO_TIM, SERVO_CHANNEL);
@@ -331,8 +338,11 @@ int main(void)
 
   HAL_TIM_Encoder_Start(&ENC_L_TIM, TIM_CHANNEL_ALL);
   HAL_TIM_Encoder_Start(&ENC_R_TIM, TIM_CHANNEL_ALL);
-  /* TIM6 gives one interrupt each WHEEL_CONTROL_PERIOD_MS: 32 MHz / 3200 / 100 = 100 Hz.
-   * After a change of the period or the clock, change the TIM6 values in CubeMX also. */
+  /* WHEEL_CONTROL_PERIOD_MS sets the TIM6 period. This replaces the period value from CubeMX,
+   * so the sample time and the RPM calculation always agree.
+   * shortcut: correct only while the APB1 clock divider is 1 (timer clock = PCLK1). */
+  __HAL_TIM_SET_AUTORELOAD(&ENC_SAMPLE_TIM,
+      HAL_RCC_GetPCLK1Freq() / (ENC_SAMPLE_TIM.Init.Prescaler + 1U) / 1000U * WHEEL_CONTROL_PERIOD_MS - 1U);
   HAL_TIM_Base_Start_IT(&ENC_SAMPLE_TIM);
 
   HAL_GPIO_WritePin(MOTOR_EN_GPIO_Port, MOTOR_EN_Pin, GPIO_PIN_SET);
@@ -375,6 +385,9 @@ int main(void)
 
     /* Hold-to-drive: stop when no key arrives for COMMAND_TIMEOUT_MS. */
     if (drive_dir != 0 && (now - t_last_key) >= COMMAND_TIMEOUT_MS) { drive_dir = 0; }
+
+    /* Heading hold is selected but the sensor did not start: do not move. */
+    if (HEADING_HOLD_ENABLE && !imu_ok) { drive_dir = 0; }
 
     wheel_control(now);
 
