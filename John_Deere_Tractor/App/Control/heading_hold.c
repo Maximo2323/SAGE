@@ -9,14 +9,14 @@ void heading_hold_init(HeadingHold *h, Bno085 *imu, Pid *pid)
   h->imu               = imu;
   h->pid               = pid;
   h->yaw_zero          = 0.0f;
-  h->prev_yaw_raw      = 0.0f;
   h->target            = 0.0f;
   h->current_yaw       = 0.0f;
   h->error             = 0.0f;
   h->output            = 0.0f;
   h->last_count        = 0;
   h->last_t_ms         = 0;
-  h->have_prev_yaw_raw = false;
+  h->reset_count       = 0;
+  h->have_prev         = false;
 }
 
 bool heading_hold_calibrate(HeadingHold *h, int samples, uint32_t warmup_ms)
@@ -40,44 +40,29 @@ bool heading_hold_calibrate(HeadingHold *h, int samples, uint32_t warmup_ms)
   if (!bno085_fresh(h->imu, HEADING_SOURCE, HAL_GetTick())) { return false; }
 
   h->yaw_zero          = circular_mean_deg(buf, samples);
-  h->have_prev_yaw_raw = false;
+  h->have_prev         = false;
+  h->reset_count       = h->imu->reset_count;
   h->target            = 0.0f;
   pid_reset(h->pid);
   return true;
-}
-
-static void handle_heading_jump(HeadingHold *h, float yaw_raw, bool is_moving)
-{
-  const float step = wrap180(yaw_raw - h->prev_yaw_raw);
-  if (fabsf(step) <= HEADING_JUMP_DEG) { return; }
-
-  if (is_moving)
-  {
-    h->yaw_zero = wrap360(h->yaw_zero + step);
-  }
-  else
-  {
-    h->yaw_zero = yaw_raw;
-    pid_reset(h->pid);
-    h->target = 0.0f;
-  }
 }
 
 bool heading_hold_update(HeadingHold *h, uint32_t now_ms, bool is_moving, float *steer_deg)
 {
   const Bno085 *imu = h->imu;
 
-  if (!bno085_fresh(imu, HEADING_SOURCE, now_ms))
+  /* After a sensor reset the heading has a new zero. It is not valid until a new calibration. */
+  if (!bno085_fresh(imu, HEADING_SOURCE, now_ms) || imu->reset_count != h->reset_count)
   {
     pid_reset(h->pid);
-    h->have_prev_yaw_raw = false;
+    h->have_prev         = false;
     h->output            = 0.0f;
     return false;
   }
 
   /* No new report: keep the last command. Do not use the same measurement again. */
   const uint32_t count = imu->count[HEADING_SOURCE];
-  if (h->have_prev_yaw_raw && count == h->last_count)
+  if (h->have_prev && count == h->last_count)
   {
     *steer_deg = h->output;
     return true;
@@ -87,15 +72,10 @@ bool heading_hold_update(HeadingHold *h, uint32_t now_ms, bool is_moving, float 
   const uint32_t t_ms    = imu->t_ms[HEADING_SOURCE];
   float          dt_s    = 0.0f;
 
-  if (h->have_prev_yaw_raw)
-  {
-    handle_heading_jump(h, yaw_raw, is_moving);
-    dt_s = (float)(t_ms - h->last_t_ms) / 1000.0f;  /* real time between the two reports */
-  }
-  h->prev_yaw_raw      = yaw_raw;
-  h->have_prev_yaw_raw = true;
-  h->last_count        = count;
-  h->last_t_ms         = t_ms;
+  if (h->have_prev) { dt_s = (float)(t_ms - h->last_t_ms) / 1000.0f; }  /* real time between the two reports */
+  h->have_prev  = true;
+  h->last_count = count;
+  h->last_t_ms  = t_ms;
 
   h->current_yaw = wrap180(yaw_raw - h->yaw_zero);
   h->error       = wrap180(h->target - h->current_yaw);
