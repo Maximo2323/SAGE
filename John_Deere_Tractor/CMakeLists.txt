@@ -47,6 +47,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     App/Control/math_utils.c
     App/Control/pid.c
+    App/Control/control.c
     App/Actuators/motor.c
     App/Actuators/servo.c
     App/Control/heading_hold.c
