@@ -42,6 +42,16 @@ extern TIM_HandleTypeDef htim8;
 extern I2C_HandleTypeDef hi2c1;
 #define BNO_I2C             hi2c1
 
+/* Bluetooth module (HC-06): USART1. PA9 = STM32 TX -> module RXD. PA10 = STM32 RX <- module TXD.
+ * Board positions (ST UM3121): PA9 = CN10-2, PA10 = CN10-4 (morpho only, no Arduino label).
+ * Not in CubeMX: main.c (bt_init) sets it up. */
+#define BT_UART             USART1
+#define BT_UART_IRQn        USART1_IRQn
+#define BT_GPIO_PORT        GPIOA
+#define BT_TX_PIN           GPIO_PIN_9
+#define BT_RX_PIN           GPIO_PIN_10
+#define BT_GPIO_AF          GPIO_AF7_USART1
+
 /* I2C addresses. BNO085: 7-bit. VL53L1X: 8-bit, as the ST driver uses them. */
 #define BNO085_I2C_ADDR     0x4BU
 #define TOF_DEFAULT_ADDR    0x52U
