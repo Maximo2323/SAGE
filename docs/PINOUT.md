@@ -21,6 +21,9 @@ Find each pin on the board with the NUCLEO-H533RE user manual before a wire is c
 | BNO085 SCL | PB6 | I2C1_SCL | AF4 |
 | BNO085 SDA | PB7 | I2C1_SDA | AF4 |
 | Serial port (no change) | PA2, PA3 | USART2 | - |
+| Bluetooth module (HC-06): STM32 TX -> module RXD | PA9 (CN10-2) | USART1_TX, set up in main.c, not in CubeMX | AF7 |
+| Bluetooth module (HC-06): STM32 RX <- module TXD | PA10 (CN10-4) | USART1_RX, pull-up | AF7 |
+| Bluetooth module (HC-06): VCC / GND | 5V (CN7-18) / GND | Module regulator: 3.6–6 V in, 3.3 V logic | - |
 | Distance sensors SCL / SDA (3 x VL53L1X) | PB6 / PB7 | I2C1, same bus as the BNO085 | AF4 |
 | Distance sensor XSHUT: front | PB0 | GPIO output, PLACEHOLDER | - |
 | Distance sensor XSHUT: right, low | PB1 | GPIO output, PLACEHOLDER | - |
