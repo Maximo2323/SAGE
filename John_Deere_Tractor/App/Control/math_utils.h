@@ -4,8 +4,8 @@
 #include <stdint.h>
 
 float clampf(float v, float lo, float hi);
-float wrap180(float deg);
-float wrap360(float deg);
+float wrap180(float deg);   /* [-180, 180) */
+float wrap360(float deg);   /* [0, 360)    */
 float circular_mean_deg(const float *deg, int n);
 
 /* Wheel speed in RPM. dt_s is the real time between the two encoder count samples. */

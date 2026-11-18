@@ -21,8 +21,9 @@ float wrap360(float deg)
 
 float wrap180(float deg)
 {
+  /* Result in [-180, 180). Exactly 180 degrees gives -180: one sign for every build. */
   deg = wrap360(deg);
-  if (deg > 180.0f) { deg -= 360.0f; }
+  if (deg >= 180.0f) { deg -= 360.0f; }
   return deg;
 }
 
