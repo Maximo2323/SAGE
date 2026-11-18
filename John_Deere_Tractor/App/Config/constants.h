@@ -15,6 +15,7 @@
 #define WHEEL_CONTROL_DT_S          ((float)WHEEL_CONTROL_PERIOD_MS / 1000.0f)
 #define STEERING_CONTROL_PERIOD_MS  20U    /* heading and steering control: 50 Hz          */
 #define TELEMETRY_PERIOD_MS         100U   /* telemetry: 10 Hz                             */
+#define BT_BAUD                     9600U  /* HC-06 (model confirmed): factory setting */
 #define MOTOR_PWM_HZ                20000U /* main.c sets the TIM8 period from this value.
                                               The BTS7960 data sheet permits 25 kHz maximum. */
 
@@ -52,11 +53,15 @@
 #define WHEEL_SPEED_MAX_RPM         MOTOR_NO_LOAD_RPM_12V /* ===== TBD: speed for key 0 (100 %). Must be less than
                                                              the no-load speed at the battery voltage. ===== */
 #define WHEEL_FF_PCT_PER_RPM        (100.0f / MOTOR_NO_LOAD_RPM_12V) /* TBD: estimate for a 12 V supply only */
-#define WHEEL_KP                    0.0f   /* ===== TBD: from the motor model ===== */
-#define WHEEL_KI                    0.0f   /* ===== TBD: from the motor model ===== */
+/* From the motor model. Only the LEFT motor was modeled, with the wheel in the air (no load).
+ * ===== TBD: change these values after a test of the two motors on the ground. ===== */
+#define WHEEL_KP                    0.4f
+#define WHEEL_KI                    6.5f
+#define WHEEL_KD                    0.0f    /* the D calculation is in pid.c. Increase it later if necessary. */
+#define WHEEL_D_FILTER_TAU_S        0.02f   /* TBD: D low-pass time constant. Has no effect while WHEEL_KD = 0. */
 
 /* --- Vehicle geometry: necessary for the rear wheel speeds in a turn --- */
-#define WHEEL_DIAMETER_MM           0.0f   /* ===== TBD: measure ===== */
+#define WHEEL_DIAMETER_MM           65.0f  /* measured */
 #define TRACK_WIDTH_MM              0.0f   /* ===== TBD: distance between the rear wheels ===== */
 #define WHEELBASE_MM                0.0f   /* ===== TBD: distance between front and rear axles ===== */
 
@@ -64,9 +69,12 @@
 #define WHEEL_ACCEL_RPM_PER_S       200.0f /* ===== TBD: ramp when the speed target increases ===== */
 #define WHEEL_DECEL_RPM_PER_S       1000.0f /* ===== TBD: ramp when the speed target decreases (key release,
                                                lost link). The Space key stops with no ramp. ===== */
-#define STEER_STEP_DEG              5.0f   /* TBD: steering angle change for each A or D key */
-
-#define PID_DEFAULT_OUT_LIMIT       255.0f
+#define STEER_STEP_DEG              10.0f   /* TBD: steering angle change for each A or D key */
+/* Smooth steering. The servo command moves at most this fast toward the requested angle, and the
+ * heading target moves toward the A/D key target at the second rate. 0 = no limit (a step).
+ * ===== TBD: not tested on the car. ===== */
+#define STEER_SLEW_DEG_S            120.0f
+#define HEADING_TARGET_RATE_DEG_S   45.0f
 
 /* --- Heading ---
  * Sign convention: positive heading = counterclockwise, seen from above.
@@ -88,11 +96,15 @@
 /* Heading hold. 0 = the A and D keys move the servo directly. 1 = the A and D keys change the
  * heading target and the heading PID moves the servo.
  * ===== TBD: keep 0 until the heading direction, SERVO_DIR and the gains are confirmed. ===== */
-#define HEADING_HOLD_ENABLE         0
-#define HEADING_STEP_DEG            5.0f   /* TBD: heading target change for each A or D key */
-#define HEADING_KP                  0.0f   /* ===== TBD: degrees of steering for each degree of error ===== */
+#define HEADING_HOLD_ENABLE         1
+#define HEADING_STEP_DEG            30.0f   /* TBD: heading target change for each A or D key */
+#define HEADING_KP                  2.0f   /* ===== TBD: degrees of steering for each degree of error ===== */
 #define HEADING_KI                  0.0f   /* ===== TBD ===== */
 #define HEADING_KD                  0.0f   /* ===== TBD ===== */
+/* The D term uses the change of the measured heading, not of the error. Thus a target change
+ * (A or D key) gives no D step. A first-order low-pass filter with this time constant
+ * smooths it. 0 = no filter. ===== TBD: new value, not tested on the car. ===== */
+#define HEADING_D_FILTER_TAU_S      0.05f
 
 #define HEADING_CAL_SAMPLES       80
 #define HEADING_CAL_WARMUP_MS     2000U
@@ -135,5 +147,22 @@
 #define SERVO_MAX_US              2000U   /* TBD */
 #define SERVO_MAX_STEER_DEG       30.0f   /* TBD */
 #define SERVO_DIR                 1.0f    /* TBD: +1 or -1. A positive angle must steer left. */
+
+/* --- Sim only: the motor model of the dashboard sim. The firmware does not use these values. ---
+ * ===== TBD: replace them with the values from the step test. ===== */
+#define SIM_MOTOR_GAIN            0.9f   /* real speed / speed that the feedforward expects */
+#define SIM_MOTOR_TAU_S           0.15f   /* motor time constant, seconds */
+/* ASSUMPTIONS, not measured: the steering servo and the geometry that the sim uses.
+ * The firmware uses WHEELBASE_MM and TRACK_WIDTH_MM above; 0 there = no rear wheel speed difference. */
+#define SIM_SERVO_RATE_DEG_S      300.0f  /* largest steering speed */
+#define SIM_SERVO_TAU_S           0.05f   /* first-order lag of the steering angle */
+#define SIM_WHEELBASE_MM          300.0f  /* used by the sim when WHEELBASE_MM = 0 */
+#define SIM_TRACK_WIDTH_MM        220.0f  /* used by the sim when TRACK_WIDTH_MM = 0 */
+#define SIM_IMU_PHASE_MS          3U      /* time of the first BNO085 report after the start */
+/* Height of each distance sensor above the ground. The sim sees an object only when the object
+ * is at least this high. Front: center of the front. Side: middle of the right side. */
+#define SIM_TOF_FRONT_HEIGHT_MM      80.0f
+#define SIM_TOF_SIDE_LOW_HEIGHT_MM   30.0f
+#define SIM_TOF_SIDE_HIGH_HEIGHT_MM  1500.0f
 
 #endif /* CONSTANTS_H */
