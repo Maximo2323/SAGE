@@ -1,10 +1,17 @@
 import math
 import os
 import pty
+import random
+import re
+import struct
+import subprocess
+import tempfile
 import time
 import unittest
+from pathlib import Path
 from unittest.mock import patch
-from dashboard import Robot, Serial, Dashboard, parse_line
+import dashboard
+from dashboard import Robot, Serial, Dashboard, SimCar, parse_line
 
 LINE = 'tgt -20 rpm -19 -21 cmd -10 -11 steer 5 g -12 r 13 rst 2 ov 4 STALL IMU-STALE\r\n'
 
@@ -70,10 +77,260 @@ class Tests(unittest.TestCase):
         r = Robot(demo=True, geometry=[100,300,220]); r.command(self.state('w'))
         now = r.last_input
         r.tick(now, .1)
-        self.assertEqual(r.data['target'], 20)
+        self.assertTrue(0 < r.data['target'] <= 20)  # ramp of control.c: 200 RPM/s
         r.command(self.state(stop=True)); r.tick(now+.1, .1)
         self.assertEqual(r.data['target'], 0)
         self.assertEqual(r.snapshot()['mode'], 'SIMULATION')
+
+FIRMWARE = dashboard.FIRMWARE
+
+
+def drive(car, seconds, key='w'):
+    """Hold a key as the browser does (one key each 80 ms)."""
+    for _ in range(int(seconds / .08)):
+        car.keys.append(key)
+        car.advance(.08)
+
+
+class SimTests(unittest.TestCase):
+    """The sim runs the firmware control core (control.c) with the values of constants.h."""
+
+    def test_no_python_controller(self):
+        for name in ('Pid', 'load_constants', 'wrap180'):
+            self.assertFalse(hasattr(dashboard, name), name)
+        self.assertNotIn('kp *', Path(dashboard.__file__).read_text())
+
+    def test_dashboard_calls_the_c_core(self):
+        car = SimCar()
+        calls = []
+        real = car.lib
+
+        class Spy:
+            def __getattr__(self, name):
+                attr = getattr(real, name)
+                if not callable(attr):
+                    return attr
+                def call(*args):
+                    calls.append(name)
+                    return attr(*args)
+                return call
+        car.lib = Spy()
+        robot = Robot(demo=True)
+        robot.sim = car
+        robot.command(dict(drive='w', turn='a', speed='5', stop=False))
+        robot.tick(1., .2)
+        for name in ('control_key', 'control_tick', 'control_wheels', 'sim_steering', 'view'):
+            self.assertIn(name, calls)
+        v = car.view()
+        self.assertEqual(v['speed_pct'], 50)
+        self.assertGreater(v['last_seq'], 0)       # the C state advanced: encoder samples
+        self.assertGreater(v['last_count'], 0)     # and heading reports
+
+    def test_config_is_the_compiled_constants(self):
+        car = SimCar()
+        text = (FIRMWARE / 'App/Config/constants.h').read_text()
+        for name in ('WHEEL_KP', 'WHEEL_KI', 'WHEEL_KD', 'HEADING_KP', 'HEADING_KI', 'HEADING_KD', 'WHEEL_DIAMETER_MM'):
+            literal = re.search(rf'#define\s+{name}\s+([-\d.]+)f', text)[1]
+            self.assertAlmostEqual(car.c[name], float(literal), places=6)
+        self.assertEqual(car.c['WHEEL_DIAMETER_MM'], 65.0)
+
+    def test_integral_removes_speed_error(self):
+        car = SimCar()
+        drive(car, 0.1, '5'); drive(car, 4)
+        self.assertAlmostEqual(car.rpm[0], 100, delta=2)  # SIM_MOTOR_GAIN < 1: the feedforward alone stays low
+
+    def test_heading_hold_turns_and_commanded_differs_from_actual(self):
+        car = SimCar()
+        drive(car, 0.1, '5'); drive(car, 1)
+        car.keys.append('a'); drive(car, 0.1)
+        v = car.view()
+        self.assertEqual(v['heading_goal'], car.c['HEADING_STEP_DEG'])
+        self.assertNotEqual(round(car.steer_actual, 3), round(v['steer_deg'], 3))  # the servo lags
+        drive(car, 15)
+        self.assertAlmostEqual(car.lib.wrap180(car.yaw - 0), car.c['HEADING_STEP_DEG'], delta=2)
+
+    def test_stop_key_and_command_timeout(self):
+        car = SimCar()
+        drive(car, 1)
+        self.assertGreater(car.view()['target_rpm'], 0)
+        car.advance(.5)                          # no key: hold-to-drive timeout, then the ramp down
+        self.assertEqual(car.view()['drive_dir'], 0)
+        drive(car, 1); car.keys.append(' '); car.advance(.01)
+        v = car.view()
+        self.assertEqual((v['target_rpm'], v['cmd_l']), (0, 0))
+
+    def test_stale_imu_stops_the_car(self):
+        car = SimCar()
+        drive(car, 1)
+        car.imu_resets += 1                      # the sensor did a reset: the heading is not valid
+        drive(car, .1)
+        self.assertEqual(car.view()['drive_dir'], 0)
+        self.assertIn('IMU-STALE', car.telemetry()['flags'])
+
+    def test_rebuild_restarts_the_controller(self):
+        car = SimCar()
+        drive(car, 1, 'a'); drive(car, 1)
+        x = car.x
+        car.mtime = -1                           # as after a change of constants.h
+        car.advance(.001)
+        v = car.view()
+        self.assertEqual((v['heading_target'], v['target_rpm'], v['drive_dir']), (0, 0, 0))
+        self.assertGreaterEqual(car.x, x)        # the car keeps its pose
+        self.assertAlmostEqual(car.lib.wrap180(car.imu_raw - car.zero), 0, delta=1e-3)  # new heading zero
+
+    def test_build_error_is_reported_and_old_core_kept(self):
+        car = SimCar()
+        with patch('dashboard.ControlLib.build', side_effect=RuntimeError('Control core does not compile: x')):
+            car.mtime = -1
+            car.advance(.01)
+        self.assertIn('does not compile', car.error)
+        drive(car, .2)                           # still runs
+        self.assertEqual(Robot(demo=True).snapshot()['sim']['error'], '')
+
+
+class WorldTests(unittest.TestCase):
+    """Track editor backend: file, validation, start pose, TOF ray casting with heights."""
+    WALL = {'type': 'wall', 'pts': [[1000, -500], [1000, 500]], 'h': 0.2}
+
+    def test_save_load_and_validation(self):
+        path = Path(tempfile.mkdtemp()) / 'track.json'
+        world = {'objects': [self.WALL, {'type': 'circle', 'x': 1, 'y': 2, 'r': 30, 'h': 1.5, 'label': 'post'},
+                             {'type': 'start', 'x': 0, 'y': 0, 'yaw': 0}]}
+        dashboard.save_world(world, path)
+        self.assertEqual(dashboard.load_world(path), world)
+        for bad in [None, {'objects': [{'type': 'tree'}]}, {'objects': [{**self.WALL, 'h': float('nan')}]},
+                    {'objects': [{**self.WALL, 'pts': [[0, 0]]}]}, {'objects': [{'type': 'box', 'x': 0, 'y': 0, 'w': -1, 'd': 1, 'h': 1}]},
+                    {'objects': [{'type': 'start', 'x': 0, 'y': 0, 'yaw': 0}] * 2}, {'objects': [{**self.WALL, 'label': 'x' * 99}]}]:
+            with self.assertRaises(ValueError):
+                dashboard.save_world(bad, path)
+        self.assertEqual(dashboard.load_world(path), world)  # a rejected track does not touch the file
+        self.assertEqual(dashboard.load_world(path.with_name('missing.json')), dashboard.DEFAULT_WORLD)
+        old = dashboard.validate_world({'objects': [{'type': 'checkpoint', 'x': 0, 'y': 0}]})  # file from before headings
+        self.assertEqual(old['objects'][0]['yaw'], 90.0)
+
+    def test_ray_heights_and_shapes(self):
+        world = {'objects': [self.WALL, {'type': 'circle', 'x': 500, 'y': 0, 'r': 100, 'h': 2.0},
+                             {'type': 'box', 'x': -700, 'y': -100, 'w': 200, 'd': 200, 'h': 0.05}]}
+        self.assertAlmostEqual(dashboard.ray_distance(world, 0, 0, 0, 0.03, 4000), 400)   # circle first
+        self.assertAlmostEqual(dashboard.ray_distance(world, 0, 0, 180, 0.03, 4000), 500)  # low box
+        self.assertIsNone(dashboard.ray_distance(world, 0, 0, 180, 0.08, 4000))           # too high to see it
+        self.assertIsNone(dashboard.ray_distance(world, 0, 0, 90, 0.03, 4000))            # nothing there
+        self.assertIsNone(dashboard.ray_distance(world, 0, 0, 0, 0.03, 300))              # out of range
+
+    def test_sim_starts_at_start_and_reads_sensors(self):
+        world = {'objects': [self.WALL, {'type': 'start', 'x': 0, 'y': 0, 'yaw': 0}]}
+        car = SimCar(world=world)
+        self.assertEqual((car.x, car.y, car.yaw), (0, 0, 0))
+        front, low, high = car.tof()
+        self.assertEqual(front['mm'], int(1000 - 1.18 * car.wheelbase))           # wall 0.2 m > 80 mm sensor
+        self.assertEqual((low['mm'], high['mm']), (-1, -1))                       # nothing on the right
+        car.yaw = 90.                                                             # the wall is now on the right
+        self.assertGreater(car.tof()[1]['mm'], 0)
+        self.assertEqual(car.tof()[2]['mm'], -1)                                  # 1.5 m sensor sees over it
+        self.assertEqual(car.telemetry()['dist'], [s['mm'] for s in car.tof()])
+        drive(car, .5)
+        self.assertEqual(car.view()['heading_target'], 0)                         # heading zero = start heading
+
+    def test_move_car_and_endpoints_need_sim(self):
+        with patch('dashboard.WORLD_FILE', Path(tempfile.mkdtemp()) / 'track.json'):
+            d = Dashboard(port='fake')
+            d.move_car({'x': 123, 'y': -45})
+            self.assertEqual(d.robot.snapshot()['pose'][:2], [123, -45])
+            with self.assertRaises(ValueError):
+                d.move_car({'x': 'a', 'y': 0})
+            d.set_world({'objects': [self.WALL]})
+            self.assertEqual(d.robot.sim.world['objects'], [self.WALL])
+            with patch('dashboard.Serial', return_value=Port()):
+                d.switch('live')
+            with self.assertRaises(ValueError):
+                d.move_car({'x': 0, 'y': 0})
+
+
+class ReplayTests(unittest.TestCase):
+    """The same input sequence through the firmware side (Tests/replay.c: Bno085 struct,
+    heading_hold_sample, control.c) and through the dashboard sim path (ctypes). The full
+    controller state must be identical after each step."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.exe = Path(tempfile.mkdtemp()) / 'replay'
+        sources = ['Tests/replay.c', 'App/Control/heading_hold.c', 'App/Control/control.c', 'App/Control/pid.c',
+                   'App/Control/math_utils.c', str(Path(dashboard.__file__).with_name('control_binding.c'))]
+        includes = ['-ITests/stubs', '-IApp/Control', '-IApp/Config', '-IApp/Sensors', '-IApp/Sensors/sh2']
+        subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-O2', *includes, *sources, '-lm', '-o', str(cls.exe)],
+                       cwd=FIRMWARE, check=True)
+
+    def sequence(self):
+        """Keys, encoder samples with counter wrap and missed samples, heading reports with repeated,
+        same-ms, late, wrapped and +-180 values, a stale period and a sensor reset."""
+        rng = random.Random(7)
+        seq, counts, yaw, t_imu, out = 0, [0xFFA0, 0x0050], 170., 0, ['k 53 0', 'k 119 0']
+        for now in range(1, 3000):
+            if now % 80 == 0:
+                out.append(f'k {ord(rng.choice("wwwwasd 2"))} {now}')
+            out.append(f't {now}')
+            if now % 10 == 0:
+                seq += 1 + (rng.random() < .05)
+                counts = [(c + rng.randint(-20, 90)) & 0xFFFF for c in counts]
+                out.append(f'w {seq} {counts[0]} {counts[1]} {now}')
+            if now % 5 == 0 and not 1500 <= now < 1900 and rng.random() < .9:
+                yaw = yaw + rng.uniform(-3, 5)  # drift: the heading goes around several times
+                yaw = (yaw + 180) % 360 - 180 if rng.random() < .97 else 180.0
+                t_imu = now - (rng.random() < .1)
+                out.append(f'i {float(numpy_float32(yaw)).hex()} {t_imu} {rng.choice([1, 1, 2])}')
+            if now % 20 == 0:
+                out.append(f's {now}')
+            if now == 700:
+                out.append(f'z {float(numpy_float32(12.5)).hex()}')
+            if now == 2200:
+                out.append('r')
+        return out
+
+    def host(self, commands):
+        """The dashboard path: SimCar's fake BNO085 state, validity check and ctypes calls."""
+        car = SimCar()
+        lib, ctl, rows = car.lib, car.ctl, []
+        lib.control_init(ctl, True, 0)
+        car.zero = 0.
+        for line in commands:
+            op, *a = line.split()
+            if op == 'k': lib.control_key(ctl, bytes([int(a[0])]), int(a[1]))
+            elif op == 't': lib.control_tick(ctl, int(a[0]))
+            elif op == 'w': lib.control_wheels(ctl, *map(int, a))
+            elif op == 'i':
+                car.imu_raw, car.imu_t = float.fromhex(a[0]), int(a[1])
+                car.imu_count += int(a[2])
+            elif op == 's': car.steering(int(a[0]))
+            elif op == 'z': car.zero, car.imu_reset_zero = float.fromhex(a[0]), car.imu_resets
+            elif op == 'r': car.imu_resets += 1
+            rows.append([float(v).hex() for v in car.lib.view(ctl).values()])
+        return rows
+
+    def test_firmware_and_dashboard_paths_match(self):
+        commands = self.sequence()
+        fw = subprocess.run([str(self.exe)], input='\n'.join(commands) + '\n', capture_output=True, text=True, check=True)
+        firmware = [[float.fromhex(x).hex() for x in row.split()] for row in fw.stdout.splitlines()]
+        host = self.host(commands)
+        self.assertEqual(len(firmware), len(commands))
+        for step, (a, b) in enumerate(zip(firmware, host)):
+            if a != b:
+                names = SimCar().lib.view_names
+                diff = [(n, x, y) for n, x, y in zip(names, a, b) if x != y]
+                self.fail(f'step {step} {commands[step]!r}: {diff}')
+        # The sequence exercises the cases: missed samples, heading output, -180 error,
+        # stale period and sensor reset (heading reference lost), repeated reports.
+        names = SimCar().lib.view_names
+        col = {n: [float.fromhex(r[names.index(n)]) for r in host] for n in names}
+        self.assertGreater(max(col['overruns']), 0)
+        self.assertGreater(max(map(abs, col['heading_out'])), 1)
+        yaw = col['current_yaw']
+        self.assertTrue(any(a > 150 and b < -150 or a < -150 and b > 150 for a, b in zip(yaw, yaw[1:])), 'no +-180 crossing')
+        self.assertGreater(sum(1 for a, b in zip(col['have_prev'], col['have_prev'][1:]) if a and not b), 1)
+
+
+def numpy_float32(x):
+    return struct.unpack('f', struct.pack('f', x))[0]
+
 
 class ModeTests(unittest.TestCase):
     def test_sim_never_writes_serial_and_all_speed_digits(self):
@@ -81,7 +338,9 @@ class ModeTests(unittest.TestCase):
         robot = Robot(serial=port, demo=True)
         for digit in '1234567890':
             robot.command(dict(drive='w', turn='', speed=digit, stop=False))
-            self.assertEqual(robot.sim_goal, 200 if digit == '0' else int(digit)*20)
+            robot.sim.advance(.01)
+            v = robot.sim.view()
+            self.assertEqual((v['speed_pct'], v['drive_dir']), (100 if digit == '0' else int(digit)*10, 1))
         self.assertEqual(port.sent, '')
 
     def test_mode_switch_resets_and_rejects_old_commands(self):
@@ -100,7 +359,8 @@ class ModeTests(unittest.TestCase):
         close.assert_called_once_with(123)
         self.assertEqual(port.sent, ' ')
         self.assertIsNone(dashboard.robot.serial)
-        self.assertEqual(dashboard.snapshot()['pose'], [0,0,0])
+        start = next(o for o in dashboard.world['objects'] if o['type'] == 'start')
+        self.assertEqual(dashboard.snapshot()['pose'], [start['x'], start['y'], math.radians(start['yaw'])])  # back at the start
 
     def test_failed_live_connection_stays_explicit_and_can_return_to_sim(self):
         dashboard = Dashboard(port='missing')
