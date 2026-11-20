@@ -1,7 +1,7 @@
 /* Hardware assignments: which timer and channel each function uses.
  *
  * GPIO pins (ENC_A, ENC_B, MOTOR_IN1, MOTOR_IN2, ...) are NOT here.
- * CubeMX owns them: change them in John_Deere_Tractor.ioc, then generate code.
+ * CubeMX owns them: change them in H533RE.ioc, then generate code.
  * CubeMX then writes the new pins in Core/Inc/main.h.
  *
  * After a timer change here, make the same change in CubeMX. The two must agree.

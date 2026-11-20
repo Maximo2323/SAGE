@@ -10,7 +10,7 @@ Build an STM32-controlled vehicle to complete an approximately 50–70 m track, 
 
 ## Keep in mind during implementation
 - Measure wheelbase, track width, effective wheel radii, encoder counts per wheel revolution, servo-angle mapping and sensor offsets.
-- Steering-servo support: `John_Deere_Tractor/App/Actuators/servo.c` (pulse range and steering limits are placeholders in `constants.h`).
+- Steering-servo support: `firmware/H533RE/App/Actuators/servo.c` (pulse range and steering limits are placeholders in `constants.h`).
 - Heading hold alone does not establish centimeter-level position accuracy. Define checkpoint sensing/localization and correction strategy; validate accumulated error over the full course, including slip, steering backlash and sensor calibration.
 - Confirm course layout, checkpoint definition, permitted external references and speed requirements before choosing navigation/control methods.
 

@@ -34,7 +34,7 @@ Only a loopback server is opened. Control requests require a per-run token and l
 
 ## Exact firmware interface inspected
 
-Source: `John_Deere_Tractor/` in this repository, inspected November 11, 2026.
+Source: `firmware/H533RE/` in this repository, inspected November 11, 2026.
 
 - MCU: STM32H533RET6; COM1 = USART2, PA2 TX / PA3 RX for `USE_NUCLEO_H533RE`.
 - 115200 baud, 8 data bits, no parity, 1 stop bit, no flow control. The comment mentioning “7-bit data” is misleading; the configured word length is 8B with no parity.
@@ -97,7 +97,7 @@ For future firmware work, consider a separate stop-only command if release shoul
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s . -v
 ```
 
-`ReplayTests` compiles `John_Deere_Tractor/Tests/replay.c` (BNO085 struct, `heading_hold_sample()`, control core) and checks that the same 3000 ms input sequence gives a bit-identical controller state on the firmware side and through the dashboard. `SimTests` check that the dashboard calls the C core and has no Python controller. Both builds here use the PC compiler: the STM32 compiler can give small float differences.
+`ReplayTests` compiles `firmware/H533RE/Tests/replay.c` (BNO085 struct, `heading_hold_sample()`, control core) and checks that the same 3000 ms input sequence gives a bit-identical controller state on the firmware side and through the dashboard. `SimTests` check that the dashboard calls the C core and has no Python controller. Both builds here use the PC compiler: the STM32 compiler can give small float differences.
 
 Tests cover exact parsing and flags, malformed inputs, command sequencing/release, watchdog stop, estimated distance and stale gaps, real POSIX pseudo-terminal fragmented serial reads/writes, and demo stopping. Browser verification covers the responsive display, a 5° steering step, holding drive, rear trails and zero output/center on release. Hardware behavior remains unverified.
 
@@ -109,7 +109,7 @@ python3 dashboard.py --port /dev/cu.usbmodemXXXX --placeholder-geometry
 
 Open http://127.0.0.1:8766. This uses explicitly uncalibrated 100/300/220 mm dimensions in the dashboard only. It does not fabricate sensor readings or alter firmware constants. The serial port name may change after reconnecting.
 
-A bare board must still have the current `John_Deere_Tractor` firmware flashed and running. With no IMU the expected flag is `IMU-FAIL`; telemetry should still arrive. Encoder inputs without encoders are not valid wheel-speed measurements. No distance trails should be interpreted as real motion.
+A bare board must still have the current `firmware/H533RE` firmware flashed and running. With no IMU the expected flag is `IMU-FAIL`; telemetry should still arrive. Encoder inputs without encoders are not valid wheel-speed measurements. No distance trails should be interpreted as real motion.
 
 To check the receive-and-return path on a bare board: click A once and look for `steer 5`; click Space and look for `steer 0` and zero target/commands. This checks command handling, not a servo. W/S can change target and output commands, but cannot validate a motor or controller without hardware feedback. On a fully wired vehicle those keys can cause movement.
 

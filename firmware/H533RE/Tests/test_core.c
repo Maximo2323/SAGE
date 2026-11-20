@@ -1,4 +1,4 @@
-/* PC test for the control core (control.c). Run it from the John_Deere_Tractor folder:
+/* PC test for the control core (control.c). Run it from the H533RE folder:
  * gcc -std=c11 -IApp/Control -IApp/Config Tests/test_core.c App/Control/control.c \
  *     App/Control/pid.c App/Control/math_utils.c -lm
  * The heading tests set their own gains, so they do not depend on the tuning in constants.h. */

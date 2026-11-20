@@ -1,4 +1,4 @@
-/* PC test for the firmware side of the heading (heading_hold.c). Run it from the John_Deere_Tractor folder:
+/* PC test for the firmware side of the heading (heading_hold.c). Run it from the H533RE folder:
  * gcc -std=c11 -ITests/stubs -IApp/Control -IApp/Config -IApp/Sensors -IApp/Sensors/sh2 \
  *     Tests/test_heading.c App/Control/heading_hold.c App/Control/control.c App/Control/pid.c \
  *     App/Control/math_utils.c -lm */

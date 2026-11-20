@@ -5,7 +5,7 @@ This repository contains the STM32 firmware for a vehicle with two driven rear w
 
 ## Firmware
 
-The `John_Deere_Tractor/` project uses the NUCLEO-H533RE board with the STM32H533RET6 microcontroller.
+The `firmware/H533RE/` project uses the NUCLEO-H533RE board with the STM32H533RET6 microcontroller.
 
 The vehicle has two rear wheels, each with a motor and an encoder.
 One servo operates the front Ackermann steering.
@@ -59,14 +59,14 @@ At 9600 baud a telemetry line takes about 80 ms. When the previous line is not s
 - The vehicle must not move for 3 seconds after power-on. The firmware sets the heading zero in this time.
 - When heading hold is on, the vehicle does not move in these conditions: the BNO085 did not start (`IMU-FAIL`), the heading data is older than 300 ms (`IMU-STALE`), or the BNO085 did a reset after power-on (`rst` is more than 0). A reset is cleared only by a new power-on.
 - `App/Config/constants.h` contains all tuning values. The mark `TBD` shows each value that is not measured.
-- `docs/PINOUT.md` shows the pin assignment and the motor cable colors.
+- `docs/PINOUT_H533RE.md` shows the pin assignment and the motor cable colors.
 - Three VL53L1X distance sensors (front, right low, right high) have a driver and one interface, `distance_read()`. They are off (`DISTANCE_ENABLE` is 0) and their XSHUT pins are placeholders.
 - `App/StateMachine/state_machine.h` is the provisional design of the automatic mode. It contains comments only.
 - `tools/tractor-dashboard/` is a PC dashboard for the telemetry and the keyboard control. It has its own README.
 
 ## Project files
 
-All paths below are relative to `John_Deere_Tractor/`.
+All paths below are relative to `firmware/H533RE/`.
 
 | Path | Contents |
 | --- | --- |
@@ -79,7 +79,7 @@ All paths below are relative to `John_Deere_Tractor/`.
 | `Tests/test_heading.c` | PC test for the BNO085 side of the heading |
 | `Tests/replay.c` | Firmware-side replay, used by the dashboard equivalence test |
 | `Drivers/` | STM32 HAL, CMSIS, and board drivers |
-| `John_Deere_Tractor.ioc` | STM32CubeMX configuration |
+| `H533RE.ioc` | STM32CubeMX configuration |
 | `CMakePresets.json` | Debug and Release build presets |
 | `.vscode/`, `.settings/` | Editor settings and STM32 tool configuration |
 
@@ -87,10 +87,10 @@ All paths below are relative to `John_Deere_Tractor/`.
 
 1. Open VS Code.
 2. Select **File > Open Folder**.
-3. Select the `John_Deere_Tractor` folder in this repository.
+3. Select the `firmware/H533RE` folder in this repository.
 
 The supplied configuration requires STM32 tools for compilation and debugging.
-Git excludes the generated files in `John_Deere_Tractor/build/`.
+Git excludes the generated files in `firmware/*/build/`.
 
 ## Make a change
 
@@ -136,4 +136,4 @@ These parts keep the licenses of their owners: `Drivers/` and the generated file
 ## Verification status
 
 The firmware compiles and links for the STM32H533 with the GCC ARM compiler. It is not tested on the hardware.
-The PC tests in `John_Deere_Tractor/Tests/` pass. They test the calculations and the control logic only. The command to run each test is at the top of its file.
+The PC tests in `firmware/H533RE/Tests/` pass. They test the calculations and the control logic only. The command to run each test is at the top of its file.

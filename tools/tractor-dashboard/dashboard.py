@@ -68,7 +68,7 @@ class Serial:
         return [line.decode('ascii', errors='replace') for line in lines]
 
 
-FIRMWARE = Path(__file__).resolve().parents[2] / 'John_Deere_Tractor'
+FIRMWARE = Path(__file__).resolve().parents[2] / 'firmware' / 'H533RE'
 CORE_SOURCES = [FIRMWARE / 'App/Control' / n for n in ('control.c', 'pid.c', 'math_utils.c')]
 CORE_FILES = CORE_SOURCES + [FIRMWARE / 'App/Control' / n for n in ('control.h', 'pid.h', 'math_utils.h')] + [
     FIRMWARE / 'App/Config/constants.h', Path(__file__).with_name('control_binding.c')]
