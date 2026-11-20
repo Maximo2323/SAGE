@@ -6,6 +6,8 @@ This repository contains the STM32 firmware for a vehicle with two driven rear w
 ## Firmware
 
 The `firmware/H533RE/` project uses the NUCLEO-H533RE board with the STM32H533RET6 microcontroller.
+The `firmware/F411RE/` project is the same firmware for the NUCLEO-F411RE board (STM32F411RET6). Four wires move: see `docs/PINOUT_F411RE.md`.
+Open one of the two folders in VS Code. Each folder has its own copy of `App/`: make a fix in both.
 
 The vehicle has two rear wheels, each with a motor and an encoder.
 One servo operates the front Ackermann steering.

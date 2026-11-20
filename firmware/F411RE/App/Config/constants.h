@@ -11,12 +11,12 @@
 
 /* --- Timing --- */
 #define WHEEL_CONTROL_PERIOD_MS     10U    /* encoder sample and wheel PI: 100 Hz.
-                                              main.c sets the TIM6 period from this value. */
+                                              main.c sets the TIM5 period from this value. */
 #define WHEEL_CONTROL_DT_S          ((float)WHEEL_CONTROL_PERIOD_MS / 1000.0f)
 #define STEERING_CONTROL_PERIOD_MS  20U    /* heading and steering control: 50 Hz          */
 #define TELEMETRY_PERIOD_MS         100U   /* telemetry: 10 Hz                             */
 #define BT_BAUD                     9600U  /* HC-06 (model confirmed): factory setting */
-#define MOTOR_PWM_HZ                20000U /* main.c sets the TIM8 period from this value.
+#define MOTOR_PWM_HZ                20000U /* main.c sets the TIM3 period from this value.
                                               The BTS7960 data sheet permits 25 kHz maximum. */
 
 /* --- Timeouts, in elapsed milliseconds --- */
