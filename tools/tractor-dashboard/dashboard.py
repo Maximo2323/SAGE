@@ -404,7 +404,8 @@ def route_header(steps):
 def write_route_headers(steps):
     for path in ROUTE_HEADERS:
         tmp = path.with_suffix('.tmp')
-        tmp.write_text(route_header(steps), encoding='utf-8', newline='\n')
+        with open(tmp, 'w', encoding='utf-8', newline='\n') as f:  # LF on Windows too; Path.write_text has no newline before 3.10
+            f.write(route_header(steps))
         os.replace(tmp, path)
 
 
