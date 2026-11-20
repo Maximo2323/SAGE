@@ -1,10 +1,11 @@
-/* Host library for the dashboard sim: the firmware control core (control.c, pid.c, math_utils.c)
+/* Host library for the dashboard sim: the firmware control core (control.c, pid.c, math_utils.c, route.c)
  * compiled for the PC with the same constants.h. dashboard.py builds and loads it (ctypes).
  * This file only adds access for Python; it has no control logic. */
 #include <stddef.h>
 #include "control.h"
 #include "constants.h"
 #include "math_utils.h"
+#include "route.h"
 
 size_t control_size(void) { return sizeof(Control); }
 
@@ -50,3 +51,15 @@ const double config_values[] = { CONFIG(CONFIG_VALUE) };
 #define VIEW_VALUE(f) out[i++] = (double)c->f;
 const char view_names[] = VIEW(VIEW_NAME);
 void control_view(const Control *c, double *out) { int i = 0; VIEW(VIEW_VALUE) }
+
+/* Route runner (route.c), for the sim. */
+size_t route_size(void) { return sizeof(Route); }
+size_t route_step_size(void) { return sizeof(RouteStep); }
+char        route_key(const Route *r, int k) { return r->keys[k]; }
+const char *route_msg(const Route *r, int k) { return r->msg[k]; }
+int         route_report(const Route *r, int k) { return r->report[k]; }
+#define ROUTE_VIEW(X) X(i) X(running) X(begun) X(lap) X(s0) X(lat) X(reading) X(avoid) X(set_goal) X(goal_deg) X(nkeys) X(nmsg)
+#define ROUTE_VIEW_VALUE(f) out[i++] = (double)r->f;
+void route_view(const Route *r, double *out) { int i = 0; ROUTE_VIEW(ROUTE_VIEW_VALUE) }
+/* Car body and sensor mounts, as fractions: the sim ToF and the drawing must use the same. */
+const double route_body[] = { ROUTE_FRONT_X, ROUTE_SIDE_X, ROUTE_SIDE_Y, ROUTE_BODY_FRONT, ROUTE_BODY_REAR, ROUTE_HALF_W };

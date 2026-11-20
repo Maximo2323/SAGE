@@ -46,6 +46,7 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user sources here
     App/Control/math_utils.c
+    App/Control/route.c
     App/Control/pid.c
     App/Control/control.c
     App/Actuators/motor.c
@@ -70,7 +71,6 @@ target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
     App/Sensors
     App/Control
     App/Actuators
-    App/StateMachine
     App/Config
     App/Sensors/sh2
     App/Sensors/vl53l1x_uld

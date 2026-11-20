@@ -31,6 +31,9 @@
 #include "heading_hold.h"
 #include "distance.h"
 #include "math_utils.h"
+#include <math.h>
+#include "route.h"
+#include "route_steps.h"
 
 /* USER CODE END Includes */
 
@@ -91,6 +94,12 @@ static Servo servo;
 static Bno085      imu;
 static HeadingHold heading;
 static Control     ctl;   /* control core (control.c): the same code runs in the dashboard sim */
+
+/* Route runner (route.c, the same code as the dashboard sim). Key R runs the route of route_steps.h.
+ * Any other operator key stops it. */
+static Route   route;
+static int32_t odo_counts_l = 0, odo_counts_r = 0;  /* encoder counts since the start, + = forward */
+static int     route_step_sent = -1;                 /* step number last sent on the links          */
 
 /* Distance for the telemetry: millimeters, -1 = no target, -2 = not valid. */
 static int distance_for_telemetry(DistId id)
@@ -179,7 +188,102 @@ static void wheel_control(uint32_t now)
   const uint16_t count_l = sample_count_l;
   const uint16_t count_r = sample_count_r;
   __enable_irq();
+  /* Wheel distance for the route runner. The 16-bit difference also works over the counter wrap. */
+  static uint32_t odo_seq = 0;
+  static uint16_t odo_prev_l = 0, odo_prev_r = 0;
+  if (seq != odo_seq)
+  {
+    odo_counts_l += ENC_DIR_LEFT * (int16_t)(uint16_t)(count_l - odo_prev_l);
+    odo_counts_r += ENC_DIR_RIGHT * (int16_t)(uint16_t)(count_r - odo_prev_r);
+    odo_prev_l = count_l; odo_prev_r = count_r; odo_seq = seq;
+  }
   control_wheels(&ctl, seq, count_l, count_r, now);
+}
+
+/* ToF readings for the route runner, in RouteSensor order. -1 = no target, or not valid. */
+static void route_read_tof(void *ctx, int32_t mm[3])
+{
+  (void)ctx;
+  for (int k = 0; k < 3; k++)
+  {
+    uint16_t v = 0;
+    mm[k] = (DISTANCE_ENABLE && distance_read((DistId)k, &v) == DIST_OK) ? (int32_t)v : -1;
+  }
+}
+
+/* One route line on the two links: "route " + text. The dashboard reads these lines. */
+static void route_line(const char *text)
+{
+  char line[ROUTE_MSG_LEN + 80];
+  send_line(line, snprintf(line, sizeof line, "route %s\r\n", text));
+}
+
+/* Id of the flashed route and its step count. The dashboard compares the id with its saved route. */
+static void route_send_id(void)
+{
+  char t[48];
+  snprintf(t, sizeof t, "id %s %d", ROUTE_ID, ROUTE_STEP_COUNT);
+  route_line(t);
+}
+
+/* One key from an operator link (USB or Bluetooth). R: run the route. ?: send the route id.
+ * Other keys: stop the route, then give the key to the control core. */
+static void operator_key(char k, uint32_t now)
+{
+  if (k == 'r' || k == 'R')
+  {
+    if (!route.running)
+    {
+      RouteConfig cfg;
+      route_config_default(&cfg);
+      route_start(&route, ROUTE_STEPS, ROUTE_STEP_COUNT, 0, false, &cfg, route_read_tof, NULL);
+      route_step_sent = -1;
+      route_send_id();
+      route_line("run");
+    }
+    return;
+  }
+  if (k == '?') { route_send_id(); return; }
+  if (route.running) { route_stop(&route); route_line("stop"); }
+  control_key(&ctl, k, now);
+}
+
+/* Each main loop, before the operator keys: one step of the route runner, as in the dashboard sim. */
+static void route_tick(uint32_t now)
+{
+  if (!route.running) { return; }
+  const RouteInput in = {
+    now,
+    (float)(odo_counts_l + odo_counts_r) * 0.5f / (float)COUNTS_PER_WHEEL_REV * 3.14159265f * WHEEL_DIAMETER_MM,
+    ctl.current_yaw, ctl.heading_goal, fmaxf(fabsf(ctl.rpm_l), fabsf(ctl.rpm_r)) };
+  route_step(&route, &in);
+  if (route.set_goal) { ctl.heading_goal = route.goal_deg; }
+  for (int k = 0; k < route.nkeys; k++) { control_key(&ctl, route.keys[k], now); }
+  for (int k = 0; k < route.nmsg; k++)
+  {
+    char t[ROUTE_MSG_LEN + 64];
+    const unsigned long s = now / 1000U, ds = now % 1000U / 100U;
+    if (route.report[k] >= 0)  /* checkpoint: the car cannot know its true error, so send the readings */
+    {
+      int32_t mm[3];
+      route_read_tof(NULL, mm);
+      snprintf(t, sizeof t, "log %lu.%lu %d checkpoint %s: ToF F/RL/RH %ld / %ld / %ld mm", s, ds,
+               route.report[k] + 1, ROUTE_STEPS[route.report[k]].label, (long)mm[0], (long)mm[1], (long)mm[2]);
+    }
+    else
+    {
+      snprintf(t, sizeof t, "log %lu.%lu %s", s, ds, route.msg[k]);
+    }
+    route_line(t);
+  }
+  if (route.i != route_step_sent)
+  {
+    char t[24];
+    route_step_sent = route.i;
+    snprintf(t, sizeof t, "step %d", route.i);
+    route_line(t);
+  }
+  if (!route.running) { route_line("stop"); }
 }
 /* USER CODE END 0 */
 
@@ -284,11 +388,13 @@ int main(void)
     /* USER CODE BEGIN 3 */
     uint32_t now = HAL_GetTick();
 
+    route_tick(now);
+
     /* One key from each link: USB (ST-LINK, USART2) and Bluetooth (USART1). Same keys. */
     int key = read_char(hcom_uart[COM1].Instance);
-    if (key >= 0) { control_key(&ctl, (char)key, now); }
+    if (key >= 0) { operator_key((char)key, now); }
     key = read_char(huart_bt.Instance);
-    if (key >= 0) { control_key(&ctl, (char)key, now); }
+    if (key >= 0) { operator_key((char)key, now); }
 
     control_tick(&ctl, now);
     wheel_control(now);

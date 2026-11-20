@@ -391,7 +391,8 @@ class RouteTests(unittest.TestCase):
 
     def test_run_from_a_checkpoint(self):
         with patch('dashboard.WORLD_FILE', Path(tempfile.mkdtemp()) / 'track.json'), \
-             patch('dashboard.ROUTE_FILE', Path(tempfile.mkdtemp()) / 'route.json'):
+             patch('dashboard.ROUTE_FILE', Path(tempfile.mkdtemp()) / 'route.json'), \
+             patch('dashboard.ROUTE_HEADERS', []):
             d = Dashboard()
             d.set_world({'objects': [{'type': 'start', 'x': 0, 'y': 0, 'yaw': 0},
                                      {'type': 'checkpoint', 'x': 5000, 'y': 2000, 'yaw': 90, 'label': 'C1'}]})
@@ -425,9 +426,65 @@ class RouteTests(unittest.TestCase):
         self.assertFalse(car.route.running)
         self.assertIn('FAILED', car.route.log[-1])
         for bad in [None, [{'type': 'jump'}], [{'type': 'drive', 'm': float('nan'), 'speed': 30}],
-                    [{'type': 'drive', 'm': 1, 'speed': 5}], [{'type': 'drive', 'm': 1, 'speed': 25}], [{'type': 'find', 'sensor': 'front', 'until': 'seen', 'mm': 1, 'tol': 1, 'max': 1, 'speed': 10, 'hold': 300}], [{'type': 'find', 'sensor': 'left', 'until': 'seen', 'mm': 1, 'tol': 1, 'max': 1, 'speed': 10}]]:
+                    [{'type': 'drive', 'm': 1, 'speed': 5}], [{'type': 'drive', 'm': 1, 'speed': 25}],
+                    [{'type': 'checkpoint', 's': 1, 'label': 'C\u00e9'}], [{'type': 'find', 'sensor': 'front', 'until': 'seen', 'mm': 1, 'tol': 1, 'max': 1, 'speed': 10, 'hold': 300}], [{'type': 'find', 'sensor': 'left', 'until': 'seen', 'mm': 1, 'tol': 1, 'max': 1, 'speed': 10}]]:
             with self.assertRaises(ValueError):
                 dashboard.validate_route(bad)
+
+
+class FirmwareRouteTests(unittest.TestCase):
+    """The firmware runs the same route.c. The dashboard gives it the steps as route_steps.h."""
+    STEPS = [{'type': 'drive', 'm': -1.25, 'speed': 30}, {'type': 'turn', 'deg': 90, 'speed': 20},
+             {'type': 'find', 'sensor': 'right_high', 'until': 'seen', 'mm': 425, 'tol': 100, 'max': 5, 'speed': 50,
+              'hold': 400, 'kp': .05, 'after': 0.7},
+             {'type': 'align', 'm': .65, 'speed': 20, 'label': 'C1'}, {'type': 'checkpoint', 's': 10, 'label': 'Gate "A"'}]
+
+    def test_header_gives_the_same_steps_as_the_sim(self):
+        steps = dashboard.validate_route(self.STEPS)
+        folder = Path(tempfile.mkdtemp())
+        with patch('dashboard.ROUTE_HEADERS', [folder / 'route_steps.h']):
+            dashboard.write_route_headers(steps)
+        (folder / 'dump.c').write_text('#include <stdio.h>\n#include "route_steps.h"\nint main(void){'
+            'fwrite(ROUTE_STEPS, sizeof ROUTE_STEPS, 1, stdout); printf("%s", ROUTE_ID); return ROUTE_STEP_COUNT;}\n')
+        exe = folder / ('dump.exe' if os.name == 'nt' else 'dump')
+        subprocess.run([dashboard.c_compiler(), '-std=c11', '-Wall', '-Werror', f'-I{folder}', f'-I{FIRMWARE}/App/Control',
+                        str(folder / 'dump.c'), '-o', str(exe)], check=True)
+        out = subprocess.run([str(exe)], capture_output=True)
+        self.assertEqual(out.returncode, len(steps))
+        self.assertEqual(out.stdout, bytes(dashboard.c_steps(steps)) + dashboard.route_id(steps).encode())
+
+    def test_body_constants_match_route_h(self):
+        f32 = lambda x: struct.unpack('f', struct.pack('f', x))[0]  # route.h has float constants
+        self.assertEqual(SimCar().lib.body, tuple(map(f32, (dashboard.FRONT_X, dashboard.SIDE_X, dashboard.SIDE_Y,
+                                                           dashboard.BODY_FRONT, dashboard.BODY_REAR, dashboard.HALF_W))))
+
+    def test_live_auto_and_manual(self):
+        d = Dashboard(port='fake', geometry=[100, 300, 220], placeholder=True)
+        port = Port()
+        with patch('dashboard.Serial', return_value=port):
+            d.switch('live')
+        self.assertEqual(port.sent, '?')                       # asks the id of the flashed route
+        d.robot.route_line('id 00000000 3')
+        self.assertIn('another route', d.snapshot()['route']['warning'])
+        d.robot.route_line(f'id {dashboard.route_id(d.route)} {len(d.route)}')
+        self.assertNotIn('warning', d.snapshot()['route'])
+        d.set_auto({'on': True})
+        self.assertEqual(port.sent, '?r')
+        state = {'drive': 'w', 'turn': '', 'speed': '1', 'stop': False, 'generation': d.generation}
+        with self.assertRaises(ValueError):
+            d.command(state)                                  # no manual keys in Auto
+        for line in ('run', 'step 2', 'log 12.3 2 drive: 1.00 m'):
+            d.robot.route_line(line)
+        r = d.snapshot()['route']
+        self.assertEqual((r['running'], r['step'], r['log'][-1]), (True, 2, '  12.3 s  2 drive: 1.00 m'))
+        d.set_auto({'on': False})                              # Manual = Space
+        self.assertEqual(port.sent, '?r ')
+        self.assertFalse(d.snapshot()['route']['running'])
+        d.command(state)
+        self.assertTrue(port.sent.endswith('w'))
+        d.switch('sim')
+        with self.assertRaises(ValueError):
+            d.set_auto({'on': True})                           # Auto is Live only
 
 
 class ReplayTests(unittest.TestCase):
@@ -539,7 +596,7 @@ class ModeTests(unittest.TestCase):
         port = dashboard.robot.serial
         dashboard.switch('sim')
         self.assertTrue(port.closed)
-        self.assertEqual(port.sent, ' ')
+        self.assertEqual(port.sent, '? ')  # ? = route id request when Live opens, Space when it closes
         self.assertIsNone(dashboard.robot.serial)
         start = next(o for o in dashboard.world['objects'] if o['type'] == 'start')
         self.assertEqual(dashboard.snapshot()['pose'], [start['x'], start['y'], math.radians(start['yaw'])])  # back at the start
