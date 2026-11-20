@@ -34,9 +34,9 @@ The steering angle stays until a new steering key or the Space key.
 
 The firmware also reads keys and sends telemetry on USART1: PA9 = STM32 TX to the module RXD, PA10 = STM32 RX from the module TXD, 9600 baud (`BT_BAUD`, the HC-06 factory setting). Connect the module VCC to 5 V and GND to GND. Module: HC-06 (confirmed). PA9 is morpho CN10-2 and PA10 is CN10-4.
 
-1. Pair the module on the Mac (Bluetooth settings; the usual PIN is `1234`).
-2. Find the port: `ls /dev/cu.*` shows a name such as `/dev/cu.HC-06`.
-3. Start the dashboard with that port: `python3 dashboard.py --port /dev/cu.HC-06`, or double-click `Start BT.command`.
+1. Pair the module in the Bluetooth settings of the PC (the usual PIN is `1234`).
+2. Double-click `Start BT.command` (macOS) or `Start BT.bat` (Windows) in `tools/tractor-dashboard`. It finds the port.
+3. If it finds no port, give the name: `--port /dev/cu.HC-06` on macOS. On Windows, look in Device Manager > Ports for the "Outgoing" Bluetooth COM port, for example `--port COM6`.
 
 At 9600 baud a telemetry line takes about 80 ms. When the previous line is not sent yet, the firmware does not send the next one on Bluetooth (the USB link gets all lines). The USB link stays on.
 
@@ -93,6 +93,26 @@ All paths below are relative to `firmware/H533RE/`.
 
 The supplied configuration requires STM32 tools for compilation and debugging.
 Git excludes the generated files in `firmware/*/build/`.
+
+## Use another PC (macOS, Windows or Linux)
+
+No file in the repository has a path that is specific to one PC. Clone the repository anywhere.
+
+Firmware (build and flash):
+
+1. Install VS Code and the STM32Cube for VS Code extension. It installs the ARM compiler, CMake and Ninja.
+2. Windows: install the ST-LINK USB driver (STSW-LINK009) or STM32CubeProgrammer, which includes it.
+3. Open `firmware/H533RE` or `firmware/F411RE` (**File > Open Folder**), build, then flash through the ST-LINK USB connector.
+
+Dashboard:
+
+1. Install Python 3.9 or newer. Windows: python.org installer, with "Add python.exe to PATH".
+2. Install a C compiler for the PC (the sim compiles the firmware control core):
+   - macOS: `xcode-select --install`
+   - Windows: MSYS2, then `pacman -S mingw-w64-ucrt-x86_64-gcc` in the MSYS2 UCRT64 shell. Add `C:\msys64\ucrt64\bin` to the PATH.
+   - Linux: `gcc` from the package manager.
+3. Windows only, for Live mode: `py -m pip install pyserial`
+4. Double-click a `Start` file in `tools/tractor-dashboard`.
 
 ## Make a change
 

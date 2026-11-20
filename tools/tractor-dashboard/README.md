@@ -1,10 +1,12 @@
 # Tractor dashboard
 
-Python standard library + one local HTML canvas page. No packages or cloud service. The sim needs a C compiler (`cc`; on macOS: `xcode-select --install`), because it runs the firmware control core. Serial support is macOS/Linux. Run only one control tab and close other serial terminals.
+Python standard library + one local HTML canvas page. No cloud service. Runs on macOS, Linux and Windows. The sim needs a C compiler, because it runs the firmware control core: `cc`, `gcc` or `clang` on the PATH, or set `CC` (macOS: `xcode-select --install`; Windows: see the main README). On Windows, Live mode also needs `pyserial`. Run only one control tab and close other serial terminals.
+
+No path in this folder is specific to one PC. Windows: use `py` in place of `python3`.
 
 ## Run
 
-From this folder:
+Double-click `Start Demo`, `Start STM` or `Start BT` (`.command` on macOS/Linux, `.bat` on Windows). Or, from this folder:
 
 ```sh
 python3 dashboard.py --demo
@@ -12,10 +14,10 @@ python3 dashboard.py --demo
 
 Open http://127.0.0.1:8766. The demo is explicitly synthetic; it uses illustrative diameter/wheelbase/track of 100/300/220 mm, ideal wheel speed response and a steering model. It is not a digital twin or a controller validation model.
 
-For the board, replace the device with its actual serial port:
+For the board, `--port auto` finds the ST-LINK port of the Nucleo board (`--port bt` finds the paired HC-06). You can also give the name: `COM5` on Windows, `/dev/cu.usbmodem1103` on macOS.
 
 ```sh
-python3 dashboard.py --port /dev/cu.usbmodemXXXX
+python3 dashboard.py --port auto
 ```
 
 There was no USB STM32 serial device visible during development. Bluetooth ports were not opened. No board was driven or flashed. A connected project folder does not establish a connected or identically flashed robot.
@@ -23,7 +25,7 @@ There was no USB STM32 serial device visible during development. Bluetooth ports
 Optional estimated travel, after measuring the robot:
 
 ```sh
-python3 dashboard.py --port /dev/cu.usbmodemXXXX --geometry-mm DIAMETER WHEELBASE TRACK
+python3 dashboard.py --port auto --geometry-mm DIAMETER WHEELBASE TRACK
 ```
 
 Replace all three words with positive dimensions in millimetres. These arguments affect the dashboard only; they do not change firmware. Without them serial mode displays a stationary schematic, valid Game yaw and commanded steering. With them it integrates average measured RPM and commanded steering as a bicycle model, labels it **estimated odometry**, and draws dotted rear-wheel trails. It does not measure X/Y, correct wheel slip, or know actual steering angles. Gaps over 300 ms are not integrated. Stale data is marked after 500 ms. Pose starts at an arbitrary origin and is lost on restart. Demo and estimated trails keep the latest 400 samples.
@@ -99,12 +101,12 @@ PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s . -v
 
 `ReplayTests` compiles `firmware/H533RE/Tests/replay.c` (BNO085 struct, `heading_hold_sample()`, control core) and checks that the same 3000 ms input sequence gives a bit-identical controller state on the firmware side and through the dashboard. `SimTests` check that the dashboard calls the C core and has no Python controller. Both builds here use the PC compiler: the STM32 compiler can give small float differences.
 
-Tests cover exact parsing and flags, malformed inputs, command sequencing/release, watchdog stop, estimated distance and stale gaps, real POSIX pseudo-terminal fragmented serial reads/writes, and demo stopping. Browser verification covers the responsive display, a 5° steering step, holding drive, rear trails and zero output/center on release. Hardware behavior remains unverified.
+Tests cover exact parsing and flags, malformed inputs, command sequencing/release, watchdog stop, estimated distance and stale gaps, real POSIX pseudo-terminal fragmented serial reads/writes (skipped on Windows), and demo stopping. Browser verification covers the responsive display, a 5° steering step, holding drive, rear trails and zero output/center on release. Hardware behavior remains unverified.
 
 ## Bare-board test with placeholder dimensions
 
 ```sh
-python3 dashboard.py --port /dev/cu.usbmodemXXXX --placeholder-geometry
+python3 dashboard.py --port auto --placeholder-geometry
 ```
 
 Open http://127.0.0.1:8766. This uses explicitly uncalibrated 100/300/220 mm dimensions in the dashboard only. It does not fabricate sensor readings or alter firmware constants. The serial port name may change after reconnecting.
@@ -120,7 +122,7 @@ If the dashboard stays `SERIAL · STALE` with no frame, verify the flashed firmw
 Start with both modes available, initially in simulation:
 
 ```sh
-python3 dashboard.py --demo --port /dev/cu.usbmodemXXXX --placeholder-geometry
+python3 dashboard.py --demo --port auto --placeholder-geometry
 ```
 
 Or run `python3 dashboard.py` for simulation only. The existing `--port` command still starts in Live. Use the Sim / Live buttons at the top to switch. Sim never opens/writes the serial port. Leaving Live attempts Space, releases the device, and resets the display. Live opens the configured port; connection errors appear in the dashboard and clicking Live retries. Mode changes reset speed to 10%, inputs and pose. Requests from the old mode are rejected.

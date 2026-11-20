@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local STM32 dashboard. Python standard library only; serial supports macOS/Linux."""
+"""Local STM32 dashboard. Python standard library only on macOS and Linux. Windows: Live mode needs pyserial."""
 import argparse
 import ctypes
 import functools
@@ -12,6 +12,7 @@ import re
 import secrets
 import select
 import platform
+import shutil
 import subprocess
 import sys
 import threading
@@ -33,6 +34,17 @@ def parse_line(line):
 
 class Serial:
     def __init__(self, path):
+        self.buffer, self.port = b'', None
+        if os.name == 'nt':  # Windows has no termios: use pyserial there
+            try:
+                import serial
+            except ImportError:
+                raise OSError(0, 'pyserial is missing. Install it with: py -m pip install pyserial') from None
+            try:
+                self.port = serial.Serial(path, 115200, timeout=0, write_timeout=1)
+            except serial.SerialException as exc:
+                raise OSError(0, str(exc)) from None
+            return
         import termios
         import tty
         import fcntl
@@ -47,25 +59,62 @@ class Serial:
         except Exception:
             os.close(self.fd)
             raise
-        self.buffer = b''
 
     def write(self, text):
         data = text.encode('ascii')
-        if os.write(self.fd, data) != len(data):
+        n = self.port.write(data) if self.port else os.write(self.fd, data)
+        if n != len(data):
             raise OSError('Incomplete serial write')
 
     def lines(self):
-        if not select.select([self.fd], [], [], 0)[0]:
-            return []
-        chunk = os.read(self.fd, 4096)
-        if not chunk:
-            raise OSError('Serial device disconnected')
+        if self.port:
+            chunk = self.port.read(4096)  # pyserial raises SerialException (an OSError) on a lost cable
+            if not chunk:
+                return []
+        else:
+            if not select.select([self.fd], [], [], 0)[0]:
+                return []
+            chunk = os.read(self.fd, 4096)
+            if not chunk:
+                raise OSError('Serial device disconnected')
         self.buffer += chunk
         lines = self.buffer.split(b'\n')
         self.buffer = lines.pop()
         if len(self.buffer) > 4096:
             self.buffer = b''
         return [line.decode('ascii', errors='replace') for line in lines]
+
+    def close(self):
+        if self.port:
+            self.port.close()
+        else:
+            os.close(self.fd)
+
+
+def find_port(kind):
+    """'auto': the ST-LINK USB serial port of the Nucleo board. 'bt': the paired HC-06 module.
+    Returns the first match or None. The port name is different on each PC and USB socket."""
+    if os.name == 'nt':
+        try:
+            from serial.tools import list_ports
+        except ImportError:
+            raise SystemExit('pyserial is missing. Install it with: py -m pip install pyserial') from None
+        for p in list_ports.comports():
+            if kind == 'auto' and p.vid == 0x0483 or kind == 'bt' and 'bluetooth' in (p.description or '').lower():
+                return p.device
+        return None
+    import glob
+    patterns = ['/dev/cu.usbmodem*', '/dev/ttyACM*'] if kind == 'auto' else ['/dev/cu.HC-0*', '/dev/rfcomm*']
+    found = sorted(f for pattern in patterns for f in glob.glob(pattern))
+    return found[0] if found else None
+
+
+def c_compiler():
+    """$CC, else the first of cc, gcc, clang on the PATH. Windows: MinGW-w64 gcc (see README)."""
+    cc = os.environ.get('CC') or next(filter(None, map(shutil.which, ('cc', 'gcc', 'clang'))), None)
+    if not cc:
+        raise RuntimeError('No C compiler found. Install gcc or clang (Windows: MinGW-w64 gcc, see README), or set CC')
+    return cc
 
 
 FIRMWARE = Path(__file__).resolve().parents[2] / 'firmware' / 'H533RE'
@@ -110,17 +159,19 @@ class ControlLib:
         """Compile the core into build/control-<hash>.so; reuse it when the sources did not change.
         Raises RuntimeError with the compiler message when the code (e.g. constants.h) does not compile."""
         digest = hashlib.sha256(b''.join(f.read_bytes() for f in CORE_FILES)).hexdigest()[:12]
-        out = BUILD / f'control-{sys.platform}-{platform.machine()}-{digest}.so'  # one build per OS and CPU
+        ext = '.dll' if os.name == 'nt' else '.so'
+        out = BUILD / f'control-{sys.platform}-{platform.machine()}-{digest}{ext}'  # one build per OS and CPU
         if not out.exists():
             BUILD.mkdir(exist_ok=True)
-            cmd = [os.environ.get('CC', 'cc'), '-std=c11', '-O2', '-shared', '-fPIC',
+            pic = ['-static-libgcc'] if os.name == 'nt' else ['-fPIC']  # Windows DLL: no libgcc DLL needed
+            cmd = [c_compiler(), '-std=c11', '-O2', '-shared', *pic,
                    f'-I{FIRMWARE}/App/Control', f'-I{FIRMWARE}/App/Config', *map(str, CORE_SOURCES),
                    str(CORE_FILES[-1]), '-lm', '-o', str(out) + '.tmp']
             result = subprocess.run(cmd, capture_output=True, text=True)
             if result.returncode:
                 raise RuntimeError('Control core does not compile: ' + (result.stderr.strip().splitlines() or ['?'])[0])
             os.replace(str(out) + '.tmp', out)
-            for old in BUILD.glob('control-*.so'):
+            for old in BUILD.glob('control-*'):
                 if old != out:
                     try:
                         old.unlink()
@@ -209,7 +260,7 @@ def validate_world(world):
 def load_world(path=None):
     path = path or WORLD_FILE
     try:
-        return validate_world(json.loads(Path(path).read_text()))
+        return validate_world(json.loads(Path(path).read_text(encoding='utf-8')))
     except FileNotFoundError:
         return json.loads(json.dumps(DEFAULT_WORLD))
 
@@ -218,7 +269,7 @@ def save_world(world, path=None):
     world = validate_world(world)
     path = Path(path or WORLD_FILE)
     tmp = path.with_suffix('.tmp')
-    tmp.write_text(json.dumps(world, indent=1))
+    tmp.write_text(json.dumps(world, indent=1), encoding='utf-8')
     os.replace(tmp, path)  # never a half-written track file
     return world
 
@@ -274,7 +325,7 @@ def validate_route(steps):
 
 def load_route(path=None):
     try:
-        return validate_route(json.loads(Path(path or ROUTE_FILE).read_text()))
+        return validate_route(json.loads(Path(path or ROUTE_FILE).read_text(encoding='utf-8')))
     except FileNotFoundError:
         return []
 
@@ -283,7 +334,7 @@ def save_route(steps, path=None):
     steps = validate_route(steps)
     path = Path(path or ROUTE_FILE)
     tmp = path.with_suffix('.tmp')
-    tmp.write_text(json.dumps(steps, indent=1))
+    tmp.write_text(json.dumps(steps, indent=1), encoding='utf-8')
     os.replace(tmp, path)
     return steps
 
@@ -940,14 +991,14 @@ class Dashboard:
             raise ValueError('Choose sim or live')
         with self.lock:
             if mode == 'live' and not self.port:
-                raise ValueError('Start with --port /dev/cu.usbmodem… to enable Live')
+                raise ValueError('Start with --port auto (or the port name) to enable Live')
             if self.robot.serial:
                 try:
                     self.robot.stop()
                 except OSError:
                     pass  # A lost cable cannot receive stop; firmware timeout remains.
                 finally:
-                    os.close(self.robot.serial.fd)
+                    self.robot.serial.close()
             self.generation += 1
             self.robot = Robot(demo=(mode == 'sim'),
                                geometry=[100, 300, 220] if mode == 'sim' else self.geometry,
@@ -1073,7 +1124,7 @@ class Dashboard:
                 except OSError:
                     pass
                 finally:
-                    os.close(self.robot.serial.fd)
+                    self.robot.serial.close()
                     self.robot.serial = None
 
 
@@ -1099,7 +1150,7 @@ def handler(robot):
                 self.reply(403, {'error': 'Local host required'})
                 return
             if self.path == '/':
-                page = Path(__file__).with_name('index.html').read_text().replace('__TOKEN__', robot.token)
+                page = Path(__file__).with_name('index.html').read_text(encoding='utf-8').replace('__TOKEN__', robot.token)
                 self.reply(200, page.encode(), 'text/html; charset=utf-8')
             elif self.path == '/state':
                 self.reply(200, robot.snapshot())
@@ -1147,12 +1198,18 @@ def handler(robot):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--demo', action='store_true', help='Start in simulation, even when --port is supplied')
-    parser.add_argument('--port', help='Explicit serial device, e.g. /dev/cu.usbmodem…')
+    parser.add_argument('--port', help='auto = the Nucleo ST-LINK port, bt = the paired HC-06, or a name: COM5, /dev/cu.usbmodem1103')
     parser.add_argument('--http-port', type=int, default=8766)
     geometry_options = parser.add_mutually_exclusive_group()
     geometry_options.add_argument('--placeholder-geometry', action='store_true', help='Illustrative 100/300/220 mm geometry; not calibrated')
     geometry_options.add_argument('--geometry-mm', type=float, nargs=3, metavar=('DIAMETER', 'WHEELBASE', 'TRACK'), help='Measured dimensions; enables ESTIMATED odometry only')
     args = parser.parse_args()
+    if args.port in ('auto', 'bt'):
+        found = find_port(args.port)
+        if not found:
+            parser.error('No Nucleo board found. Connect it, or give the port name.' if args.port == 'auto'
+                         else 'No paired HC-06 found. Pair it first, or give the port name.')
+        args.port = found
     if args.geometry_mm and any(not math.isfinite(v) or v <= 0 for v in args.geometry_mm):
         parser.error('All dimensions must be finite and positive')
     robot = Dashboard(args.port, args.geometry_mm or ([100, 300, 220] if args.placeholder_geometry else None), args.placeholder_geometry)
@@ -1162,7 +1219,7 @@ def main():
     server.timeout = .2
     thread = threading.Thread(target=robot.run, daemon=True)
     thread.start()
-    print(f"http://127.0.0.1:{args.http_port} — {'SIMULATION (no robot)' if robot.robot.demo else args.port}", flush=True)
+    print(f"Open http://127.0.0.1:{args.http_port} in a browser. Ctrl+C stops. Mode: {'SIMULATION (no robot)' if robot.robot.demo else args.port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

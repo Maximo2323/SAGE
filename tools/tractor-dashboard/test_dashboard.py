@@ -1,6 +1,5 @@
 import math
 import os
-import pty
 import random
 import re
 import struct
@@ -19,6 +18,7 @@ class Port:
     def __init__(self): self.sent = ''
     def write(self, s): self.sent += s
     def lines(self): return []
+    def close(self): self.closed = True
 
 class Tests(unittest.TestCase):
     def state(self, drive='', turn='', speed='1', stop=False):
@@ -60,7 +60,9 @@ class Tests(unittest.TestCase):
         uncalibrated = Robot(); uncalibrated.ingest(frame, 1); uncalibrated.ingest(frame, 1.1)
         self.assertEqual(uncalibrated.pose, [0,0,0])
 
+    @unittest.skipIf(os.name == 'nt', 'POSIX pty only')
     def test_serial_pty_fragmented_frames_and_commands(self):
+        import pty
         master, slave = pty.openpty()
         serial = Serial(os.ttyname(slave))
         try:
@@ -71,7 +73,7 @@ class Tests(unittest.TestCase):
             serial.write('w ')
             self.assertEqual(os.read(master, 2), b'w ')
         finally:
-            os.close(serial.fd); os.close(master); os.close(slave)
+            serial.close(); os.close(master); os.close(slave)
 
     def test_simulated_stop(self):
         r = Robot(demo=True, geometry=[100,300,220]); r.command(self.state('w'))
@@ -98,7 +100,7 @@ class SimTests(unittest.TestCase):
     def test_no_python_controller(self):
         for name in ('Pid', 'load_constants', 'wrap180'):
             self.assertFalse(hasattr(dashboard, name), name)
-        self.assertNotIn('kp *', Path(dashboard.__file__).read_text())
+        self.assertNotIn('kp *', Path(dashboard.__file__).read_text(encoding='utf-8'))
 
     def test_dashboard_calls_the_c_core(self):
         car = SimCar()
@@ -128,7 +130,7 @@ class SimTests(unittest.TestCase):
 
     def test_config_is_the_compiled_constants(self):
         car = SimCar()
-        text = (FIRMWARE / 'App/Config/constants.h').read_text()
+        text = (FIRMWARE / 'App/Config/constants.h').read_text(encoding='utf-8')
         for name in ('WHEEL_KP', 'WHEEL_KI', 'WHEEL_KD', 'HEADING_KP', 'HEADING_KI', 'HEADING_KD', 'WHEEL_DIAMETER_MM'):
             literal = re.search(rf'#define\s+{name}\s+([-\d.]+)f', text)[1]
             self.assertAlmostEqual(car.c[name], float(literal), places=6)
@@ -435,11 +437,11 @@ class ReplayTests(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        cls.exe = Path(tempfile.mkdtemp()) / 'replay'
+        cls.exe = Path(tempfile.mkdtemp()) / ('replay.exe' if os.name == 'nt' else 'replay')
         sources = ['Tests/replay.c', 'App/Control/heading_hold.c', 'App/Control/control.c', 'App/Control/pid.c',
                    'App/Control/math_utils.c', str(Path(dashboard.__file__).with_name('control_binding.c'))]
         includes = ['-ITests/stubs', '-IApp/Control', '-IApp/Config', '-IApp/Sensors', '-IApp/Sensors/sh2']
-        subprocess.run([os.environ.get('CC', 'cc'), '-std=c11', '-O2', *includes, *sources, '-lm', '-o', str(cls.exe)],
+        subprocess.run([dashboard.c_compiler(), '-std=c11', '-O2', *includes, *sources, '-lm', '-o', str(cls.exe)],
                        cwd=FIRMWARE, check=True)
 
     def sequence(self):
@@ -534,11 +536,9 @@ class ModeTests(unittest.TestCase):
         self.assertIsNone(dashboard.snapshot()['data'])
         with self.assertRaises(ValueError):
             dashboard.command(dict(drive='w',turn='',speed='1',stop=False,generation=old))
-        dashboard.robot.serial.fd = 123
         port = dashboard.robot.serial
-        with patch('dashboard.os.close') as close:
-            dashboard.switch('sim')
-        close.assert_called_once_with(123)
+        dashboard.switch('sim')
+        self.assertTrue(port.closed)
         self.assertEqual(port.sent, ' ')
         self.assertIsNone(dashboard.robot.serial)
         start = next(o for o in dashboard.world['objects'] if o['type'] == 'start')
