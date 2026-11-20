@@ -246,6 +246,188 @@ class WorldTests(unittest.TestCase):
                 d.move_car({'x': 0, 'y': 0})
 
 
+class RouteTests(unittest.TestCase):
+    """Route blocks: run in the sim through the firmware keys and the heading goal."""
+    def run_route(self, world, steps, seconds):
+        car = SimCar(world=world)
+        car.route = dashboard.Route(dashboard.validate_route(steps))
+        for _ in range(seconds):
+            car.advance(1)
+            if not car.route.running:
+                break
+        self.assertFalse(car.route.running, car.route.log)
+        self.assertIn('route done', car.route.log[-1])
+        return car
+
+    def test_drive_checkpoint_turn(self):
+        world = {'objects': [{'type': 'start', 'x': 0, 'y': 0, 'yaw': 0},
+                             {'type': 'checkpoint', 'x': 1000, 'y': 0, 'yaw': 0, 'label': 'C1'}]}
+        car = self.run_route(world, [{'type': 'drive', 'm': 1, 'speed': 30}, {'type': 'checkpoint', 'label': 'C1', 's': 1},
+                                     {'type': 'turn', 'deg': 90, 'speed': 30}], 60)
+        error = float(re.search(r'off by ([\d.]+) cm', ' '.join(car.route.log))[1])
+        self.assertLess(error, 5)
+        self.assertAlmostEqual(car.lib.wrap180(car.yaw - 90), 0, delta=4)
+
+    def test_find_lost_stops_at_the_end_of_the_wall(self):
+        world = {'objects': [{'type': 'start', 'x': 0, 'y': 0, 'yaw': 0},
+                             {'type': 'wall', 'pts': [[-500, -500], [2000, -500]], 'h': 0.2}]}
+        car = self.run_route(world, [{'type': 'find', 'sensor': 'right_low', 'until': 'lost', 'mm': 425, 'tol': 100,
+                                      'max': 5, 'speed': 50}], 60)
+        self.assertAlmostEqual(car.x + .5 * car.wheelbase, 2000, delta=20)  # the side sensor is at the wall end
+
+    def test_align_from_the_edge_to_the_checkpoint(self):
+        world = {'objects': [{'type': 'start', 'x': 0, 'y': 0, 'yaw': 0}, {'type': 'checkpoint', 'x': 2500, 'y': 0, 'yaw': 0, 'label': 'C1'},
+                             {'type': 'wall', 'pts': [[-500, -500], [2000, -500]], 'h': 0.2}]}
+        find = {'type': 'find', 'sensor': 'right_low', 'until': 'lost', 'mm': 425, 'tol': 100, 'max': 5, 'speed': 50}
+        m = dashboard.edge_to_checkpoint(SimCar(world=world), world['objects'][1], find)
+        self.assertAlmostEqual(m, 2.5 - 2.0 + .15, delta=.01)  # side sensor 0.15 m ahead of the rear axle
+        car = self.run_route(world, [find, {'type': 'align', 'label': 'C1', 'm': m, 'speed': 20}], 60)
+        error = float(re.search(r'off by ([\d.]+) cm', ' '.join(car.route.log))[1])
+        self.assertLess(error, 2)
+
+    def test_find_holds_the_distance_to_the_wall(self):
+        world = {'objects': [{'type': 'start', 'x': 0, 'y': 300, 'yaw': 0},
+                             {'type': 'wall', 'pts': [[-500, -500], [6000, -500]], 'h': 0.2}]}
+        find = {'type': 'find', 'sensor': 'right_low', 'until': 'lost', 'mm': 600, 'tol': 300, 'max': 10, 'speed': 40,
+                'hold': 425, 'kp': .05}
+        car = self.run_route(world, [find], 120)
+        self.assertAlmostEqual(car.y, 0, delta=40)                          # 300 mm too far at the start
+        self.assertAlmostEqual(car.x + .5 * car.wheelbase, 6000, delta=20)  # still stops at the end
+
+    def test_find_seen_then_after_metres(self):
+        world = {'objects': [{'type': 'start', 'x': 0, 'y': 0, 'yaw': 0},
+                             {'type': 'wall', 'pts': [[1000, -500], [6000, -500]], 'h': 0.2}]}
+        car = self.run_route(world, [{'type': 'find', 'sensor': 'right_low', 'until': 'seen', 'mm': 425, 'tol': 100,
+                                      'max': 3, 'speed': 40, 'hold': 425, 'after': 2}], 60)
+        self.assertAlmostEqual(car.x + .5 * car.wheelbase, 3000, delta=30)  # side sensor 2 m past the start of the wall
+
+    def test_loop_starts_again_at_step_one(self):
+        car = SimCar(world={'objects': [{'type': 'start', 'x': 0, 'y': 0, 'yaw': 0}]})
+        car.route = dashboard.Route(dashboard.validate_route([{'type': 'drive', 'm': .3, 'speed': 30}]), loop=True)
+        for _ in range(10):
+            car.advance(1)
+        self.assertTrue(car.route.running)
+        self.assertGreaterEqual(car.route.lap, 3)
+        self.assertIn('lap 1 done', ' '.join(car.route.log))
+
+    BOX = {'type': 'box', 'x': 1500, 'y': -300, 'w': 300, 'd': 600, 'h': .3}
+
+    def drive_past(self, box, seconds=150, remove_at=None, hook=None, max_offset=None):
+        """Drive 4 m toward box; returns the car and how often a body point was inside the box."""
+        car = SimCar(world={'objects': [{'type': 'start', 'x': 0, 'y': 0, 'yaw': 0}, box]})
+        if max_offset:
+            car.c['AVOID_MAX_OFFSET_MM'] = max_offset
+        car.route = dashboard.Route(dashboard.validate_route([{'type': 'drive', 'm': 4, 'speed': 30}]))
+        hits = 0
+        for k in range(seconds * 20):
+            car.advance(.05)
+            if remove_at and 'stop and wait' in ' '.join(car.route.log) and k * .05 > remove_at:
+                car.world = {'objects': [o for o in car.world['objects'] if o is not box]}
+            if hook:
+                hook(car)
+            L, T, yaw = car.wheelbase, car.track, math.radians(car.yaw)
+            for fx in (-.183 * L, .5 * L, 1.184 * L):
+                for fy in (-.34 * T, 0, .34 * T):
+                    px, py = car.x + fx * math.cos(yaw) - fy * math.sin(yaw), car.y + fx * math.sin(yaw) + fy * math.cos(yaw)
+                    hits += box['x'] <= px <= box['x'] + box['w'] and box['y'] <= py <= box['y'] + box['d']
+            if not car.route.running:
+                break
+        return car, hits
+
+    def test_goes_around_a_persistent_obstacle(self):
+        for box in (self.BOX, {**self.BOX, 'd': 1800}):  # 0.3 m and 1.5 m to the left of the line
+            car, hits = self.drive_past(box)
+            log = ' '.join(car.route.log)
+            self.assertIn('route done', log)
+            self.assertIn('back on the line', log)
+            self.assertEqual(hits, 0, log)
+            self.assertAlmostEqual(car.y, 0, delta=150)
+            self.assertAlmostEqual(car.lib.wrap180(car.yaw), 0, delta=5)  # straight again, not still swerving
+
+    def test_waits_for_a_temporary_obstacle(self):
+        car, hits = self.drive_past(self.BOX, remove_at=5)
+        log = ' '.join(car.route.log)
+        self.assertIn('obstacle gone', log)
+        self.assertNotIn('go around', log)
+        self.assertAlmostEqual(car.x, 4000, delta=60)
+
+    def test_new_obstacle_during_the_pass(self):
+        for stays in (False, True):
+            other = {'type': 'box', 'x': 2600, 'y': 300, 'w': 200, 'd': 600, 'h': .3}  # in the detour path
+
+            def hook(car, t={}):
+                log = ' '.join(car.route.log)
+                if 'passing' in log and 'n' not in t:
+                    t['n'] = car.now
+                    car.world = {'objects': car.world['objects'] + [other]}
+                if not stays and 'during the detour' in log and car.now - t['n'] > 3000:
+                    car.world = {'objects': [o for o in car.world['objects'] if o is not other]}
+            car, hits = self.drive_past(self.BOX, hook=hook)
+            log = ' '.join(car.route.log)
+            self.assertIn('during the detour: stop and wait', log)
+            self.assertEqual(hits, 0)
+            self.assertIn('route done', log)
+            self.assertIn('go around both' if stays else 'continue the detour', log)
+            self.assertAlmostEqual(car.y, 0, delta=150)  # back on the first line
+
+    def test_obstacle_wider_than_max_offset_fails(self):
+        car, hits = self.drive_past({**self.BOX, 'd': 1800}, max_offset=1000)
+        self.assertIn('FAILED, obstacle needs more than 1 m', car.route.log[-1])
+        self.assertEqual(hits, 0)
+
+    def test_reading_is_corrected_for_the_car_angle(self):
+        world = {'objects': [{'type': 'start', 'x': 0, 'y': 0, 'yaw': 0},
+                             {'type': 'wall', 'pts': [[-5000, -1000], [5000, -1000]], 'h': 0.2}]}
+        car = SimCar(world=world)
+        route = car.route = dashboard.Route(dashboard.validate_route([{'type': 'find', 'sensor': 'right_low', 'until': 'seen',
+                                              'mm': 3000, 'tol': 10, 'max': 1, 'speed': 10}]))
+        car.advance(.001)                         # route heading = start heading
+        car.yaw = 20.                             # the IMU sees the car turned 20 deg
+        car.advance(.3)
+        square = 1000 - .34 * car.track * math.cos(math.radians(20)) + .5 * car.wheelbase * math.sin(math.radians(20))  # turned left: the sensor moves away
+        self.assertAlmostEqual(route.reading, square, delta=15)
+
+    def test_run_from_a_checkpoint(self):
+        with patch('dashboard.WORLD_FILE', Path(tempfile.mkdtemp()) / 'track.json'), \
+             patch('dashboard.ROUTE_FILE', Path(tempfile.mkdtemp()) / 'route.json'):
+            d = Dashboard()
+            d.set_world({'objects': [{'type': 'start', 'x': 0, 'y': 0, 'yaw': 0},
+                                     {'type': 'checkpoint', 'x': 5000, 'y': 2000, 'yaw': 90, 'label': 'C1'}]})
+            d.set_route([{'type': 'drive', 'm': 9, 'speed': 30}, {'type': 'checkpoint', 'label': 'C1', 's': 0},
+                         {'type': 'drive', 'm': .5, 'speed': 30}])
+            with self.assertRaises(ValueError):
+                d.run_route({'run': True, 'from': 0})        # not a checkpoint step
+            d.run_route({'run': True, 'from': 1})
+            car = d.robot.sim
+            self.assertEqual(car.route.i, 2)
+            for _ in range(20):
+                car.advance(1)
+            self.assertIn('route done', car.route.log[-1])
+            self.assertAlmostEqual(car.x, 5000, delta=30)        # drove 0.5 m along the checkpoint heading
+            self.assertAlmostEqual(car.y, 2500, delta=60)
+            with self.assertRaises(ValueError):
+                d.set_speed({'x': 3})
+            d.set_speed({'x': 4})
+            d.run_route({'run': True})
+            state = {'drive': 'w', 'turn': '', 'speed': '5', 'stop': False, 'generation': d.generation}
+            with self.assertRaises(ValueError):
+                d.command(state)                            # no manual keys while a route runs
+            d.command({**state, 'drive': '', 'stop': True})  # Stop always works
+            self.assertEqual(d.snapshot()['sim_speed'], 4)
+
+    def test_find_fails_after_max_and_validation(self):
+        car = SimCar(world={'objects': [{'type': 'start', 'x': 0, 'y': 0, 'yaw': 0}]})
+        car.route = dashboard.Route(dashboard.validate_route([{'type': 'find', 'sensor': 'front', 'until': 'seen', 'mm': 300, 'tol': 50, 'max': .3, 'speed': 30}]))
+        for _ in range(20):
+            car.advance(1)
+        self.assertFalse(car.route.running)
+        self.assertIn('FAILED', car.route.log[-1])
+        for bad in [None, [{'type': 'jump'}], [{'type': 'drive', 'm': float('nan'), 'speed': 30}],
+                    [{'type': 'drive', 'm': 1, 'speed': 5}], [{'type': 'drive', 'm': 1, 'speed': 25}], [{'type': 'find', 'sensor': 'front', 'until': 'seen', 'mm': 1, 'tol': 1, 'max': 1, 'speed': 10, 'hold': 300}], [{'type': 'find', 'sensor': 'left', 'until': 'seen', 'mm': 1, 'tol': 1, 'max': 1, 'speed': 10}]]:
+            with self.assertRaises(ValueError):
+                dashboard.validate_route(bad)
+
+
 class ReplayTests(unittest.TestCase):
     """The same input sequence through the firmware side (Tests/replay.c: Bno085 struct,
     heading_hold_sample, control.c) and through the dashboard sim path (ctypes). The full

@@ -1,0 +1,120 @@
+[
+ {
+  "type": "drive",
+  "m": 5,
+  "speed": 100
+ },
+ {
+  "type": "find",
+  "mm": 3000,
+  "tol": 2000,
+  "max": 40,
+  "speed": 80,
+  "hold": 1200,
+  "kp": 0.05,
+  "after": 0,
+  "sensor": "right_low",
+  "until": "lost"
+ },
+ {
+  "type": "align",
+  "m": -0.5,
+  "speed": 20,
+  "label": "C1"
+ },
+ {
+  "type": "checkpoint",
+  "s": 10,
+  "label": "C1"
+ },
+ {
+  "type": "drive",
+  "m": 2,
+  "speed": 70
+ },
+ {
+  "type": "turn",
+  "deg": -90,
+  "speed": 30
+ },
+ {
+  "type": "drive",
+  "m": 10,
+  "speed": 100
+ },
+ {
+  "type": "turn",
+  "deg": -45,
+  "speed": 90
+ },
+ {
+  "type": "drive",
+  "m": 29,
+  "speed": 100
+ },
+ {
+  "type": "turn",
+  "deg": -45,
+  "speed": 50
+ },
+ {
+  "type": "drive",
+  "m": 13,
+  "speed": 90
+ },
+ {
+  "type": "turn",
+  "deg": -90,
+  "speed": 70
+ },
+ {
+  "type": "drive",
+  "m": 13,
+  "speed": 100
+ },
+ {
+  "type": "find",
+  "mm": 3000,
+  "tol": 1500,
+  "max": 20,
+  "speed": 40,
+  "hold": 300,
+  "kp": 0.05,
+  "after": 1,
+  "sensor": "right_high",
+  "until": "seen"
+ },
+ {
+  "type": "find",
+  "mm": 1000,
+  "tol": 800,
+  "max": 20,
+  "speed": 30,
+  "hold": 1200,
+  "kp": 0.3,
+  "after": 0,
+  "sensor": "right_low",
+  "until": "lost"
+ },
+ {
+  "type": "align",
+  "m": -1,
+  "speed": 20,
+  "label": "C2"
+ },
+ {
+  "type": "checkpoint",
+  "s": 10,
+  "label": "C2"
+ },
+ {
+  "type": "drive",
+  "m": 10,
+  "speed": 30
+ },
+ {
+  "type": "turn",
+  "deg": -90,
+  "speed": 50
+ }
+]

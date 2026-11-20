@@ -1,6 +1,7 @@
-/* PC test for the heading logic. Run it from the John_Deere_Tractor folder:
+/* PC test for the firmware side of the heading (heading_hold.c). Run it from the John_Deere_Tractor folder:
  * gcc -std=c11 -ITests/stubs -IApp/Control -IApp/Config -IApp/Sensors -IApp/Sensors/sh2 \
- *     Tests/test_heading.c App/Control/heading_hold.c App/Control/pid.c App/Control/math_utils.c -lm */
+ *     Tests/test_heading.c App/Control/heading_hold.c App/Control/control.c App/Control/pid.c \
+ *     App/Control/math_utils.c -lm */
 #include <assert.h>
 #include <math.h>
 #include "heading_hold.h"
@@ -25,50 +26,41 @@ static void report(float yaw_deg, uint32_t t_ms)
 
 int main(void)
 {
-  Pid         pid;
   HeadingHold h;
-  float       out = 0.0f;
-
+  heading_hold_init(&h, &imu);
   imu.initialized = true;
-  pid_init(&pid, 1.0f, 0.0f, 0.0f);  /* output = heading error */
-  heading_hold_init(&h, &imu, &pid);
+
+  /* No report yet: not valid. */
+  assert(!heading_hold_sample(&h, 0).valid);
 
   /* A report that is newer than "now" is fresh (the main loop reads the time first). */
-  report(0.0f, 1002);
-  assert(bno085_fresh(&imu, SRC, 1000));
-  assert(heading_hold_update(&h, 1000, true, &out));
+  report(10.0f, 1002);
+  HeadingSample s = heading_hold_sample(&h, 1000);
+  assert(s.valid && s.count == 1 && s.t_ms == 1002 && NEAR(s.yaw_deg, 10.0f));
 
-  /* Wrapped error: target 175, heading -175. The short way is -10 degrees, not +350. */
-  h.target = 175.0f;
-  report(-175.0f, 1012);
-  assert(heading_hold_update(&h, 1012, true, &out));
-  assert(NEAR(h.error, -10.0f) && NEAR(out, -10.0f));
-
-  /* No new report: the command stays, and the PID does not run again. */
-  h.target = 0.0f;
-  assert(heading_hold_update(&h, 1020, true, &out));
-  assert(NEAR(out, -10.0f));
-
-  /* A new report: the command changes. */
-  report(-175.0f, 1022);
-  assert(heading_hold_update(&h, 1022, true, &out));
-  assert(NEAR(out, 175.0f));
+  /* The yaw is relative to the zero, in [-180, 180). */
+  h.yaw_zero = 350.0f;
+  report(-175.0f, 1010);
+  s = heading_hold_sample(&h, 1010);
+  assert(NEAR(s.yaw_deg, -165.0f));
+  report(170.0f, 1020);
+  assert(heading_hold_sample(&h, 1020).yaw_deg == -180.0f);
 
   /* A report older than BNO_STALE_TIMEOUT_MS is not valid. */
-  assert(!bno085_fresh(&imu, SRC, 1022 + BNO_STALE_TIMEOUT_MS));
-  assert(!heading_hold_update(&h, 1022 + BNO_STALE_TIMEOUT_MS, true, &out));
+  assert(!heading_hold_sample(&h, 1020 + BNO_STALE_TIMEOUT_MS).valid);
 
   /* A sensor reset after the calibration makes the heading not valid, also with fresh data. */
-  report(0.0f, 2000);
-  assert(heading_hold_update(&h, 2000, true, &out));
   imu.reset_count++;
   report(0.0f, 2010);
-  assert(!heading_hold_update(&h, 2010, true, &out));
+  assert(!heading_hold_sample(&h, 2010).valid);
 
-  /* The calibration accepts the new sensor state. */
+  /* The calibration accepts the new sensor state and sets the zero (circular mean). */
   tick = 2010;
-  assert(heading_hold_calibrate(&h, 4, 0));
-  report(0.0f, tick);
-  assert(heading_hold_update(&h, tick, true, &out));
+  imu.yaw_deg[SRC] = -5.0f;  /* bno085_update is a stub: the same value for each sample */
+  imu.t_ms[SRC] = 2010 + 40 + 2000;
+  assert(heading_hold_calibrate(&h, 4, 2000));
+  assert(NEAR(h.yaw_zero, 355.0f) && h.reset_count == imu.reset_count);
+  s = heading_hold_sample(&h, tick);
+  assert(s.valid && NEAR(s.yaw_deg, 0.0f));
   return 0;
 }

@@ -11,22 +11,32 @@ The vehicle has two rear wheels, each with a motor and an encoder.
 One servo operates the front Ackermann steering.
 A BNO085 sensor gives the heading.
 
-### Keyboard control (serial port, 115200 baud)
+### Keyboard control (USB serial port, 115200 baud, or Bluetooth)
 
-Open a serial terminal on the ST-LINK virtual COM port. The firmware reads one key at a time.
+Open a serial terminal on the ST-LINK virtual COM port, or on the Bluetooth port (see below). The firmware reads one key at a time from each link. The two links accept the same keys and send the same telemetry.
 
 | Key | Function |
 | --- | --- |
 | `W` | Move forward |
 | `S` | Move in reverse |
-| `A` | Steer 5 degrees more to the left |
-| `D` | Steer 5 degrees more to the right |
+| `A` | Heading target 30 degrees to the left (heading hold), or steer 10 degrees more to the left |
+| `D` | Heading target 30 degrees to the right (heading hold), or steer 10 degrees more to the right |
 | Space | Stop immediately, center the steering, and clear a stall |
 | `1` to `9` | Set the wheel speed to 10 to 90 percent |
 | `0` | Set the wheel speed to 100 percent |
 
-Hold `W` or `S` to move. The vehicle stops when no key arrives for 300 ms.
+Hold `W` or `S` to move. The vehicle stops when no `W` or `S` key arrives for 300 ms. Other keys do not restart this time.
 The steering angle stays until a new steering key or the Space key.
+
+### Bluetooth (HC-06, not tested)
+
+The firmware also reads keys and sends telemetry on USART1: PA9 = STM32 TX to the module RXD, PA10 = STM32 RX from the module TXD, 9600 baud (`BT_BAUD`, the HC-06 factory setting). Connect the module VCC to 5 V and GND to GND. Module: HC-06 (confirmed). PA9 is morpho CN10-2 and PA10 is CN10-4.
+
+1. Pair the module on the Mac (Bluetooth settings; the usual PIN is `1234`).
+2. Find the port: `ls /dev/cu.*` shows a name such as `/dev/cu.HC-06`.
+3. Start the dashboard with that port: `python3 dashboard.py --port /dev/cu.HC-06`, or double-click `Start BT.command`.
+
+At 9600 baud a telemetry line takes about 80 ms. When the previous line is not sent yet, the firmware does not send the next one on Bluetooth (the USB link gets all lines). The USB link stays on.
 
 ### Update intervals
 
@@ -40,13 +50,14 @@ The steering angle stays until a new steering key or the Space key.
 
 ### Present firmware state
 
-- Each rear wheel has a speed controller: a feedforward term and a PI controller. The PI gains are 0 until the motor model is measured.
+- `App/Control/control.c` is the control core: keys, wheel speed control and heading hold. It has no hardware calls. The firmware and the dashboard sim run this same code with the same `constants.h`.
+- Each rear wheel has a speed controller: a feedforward term and a PI controller (Kp 0.4, Ki 6.5, Kd 0). The gains come from a model of the left motor, with the wheel in the air. Change them after a test on the ground.
 - The motors stop when a command is 30 percent or more and an encoder gives no counts for 300 ms. The Space key clears this stall condition.
 - The telemetry line shows the speed target, the two wheel speeds, the two motor commands, the steering angle, and the count of missed encoder samples.
 - The firmware reads two heading reports from the BNO085: the Game Rotation Vector each 10 ms and the Rotation Vector each 20 ms. `HEADING_SOURCE` selects the report for control. The telemetry shows the two headings as `g` and `r`.
-- Heading hold is off (`HEADING_HOLD_ENABLE` is 0). When it is on, the `A` and `D` keys change the heading target by 5 degrees, and the heading PID moves the servo.
+- Heading hold is on (`HEADING_HOLD_ENABLE` is 1, Kp 0.6, Ki 0.5, Kd 0.5, not tested on the car). The `A` and `D` keys change the heading target by 30 degrees, and the heading PID moves the servo. The PID output limit is the steering limit (±30 degrees). The D term uses the filtered change of the measured heading (`HEADING_D_FILTER_TAU_S`), so a target change gives no D step. A heading gap longer than 300 ms restarts the heading controller.
 - The vehicle must not move for 3 seconds after power-on. The firmware sets the heading zero in this time.
-- When the heading data is older than 300 ms and heading hold is on, the vehicle does not move. The telemetry shows `IMU-STALE`.
+- When heading hold is on, the vehicle does not move in these conditions: the BNO085 did not start (`IMU-FAIL`), the heading data is older than 300 ms (`IMU-STALE`), or the BNO085 did a reset after power-on (`rst` is more than 0). A reset is cleared only by a new power-on.
 - `App/Config/constants.h` contains all tuning values. The mark `TBD` shows each value that is not measured.
 - `docs/PINOUT.md` shows the pin assignment and the motor cable colors.
 - Three VL53L1X distance sensors (front, right low, right high) have a driver and one interface, `distance_read()`. They are off (`DISTANCE_ENABLE` is 0) and their XSHUT pins are placeholders.
@@ -62,7 +73,11 @@ All paths below are relative to `John_Deere_Tractor/`.
 | `Core/Src/main.c` | Main loop, encoder measurement, and speed calculation |
 | `App/` | Controllers, actuators, sensors, and constants |
 | `Core/Inc/` | Headers that STM32CubeMX generates |
-| `Tests/test_control.c` | PC test for the control calculations |
+| `App/Control/control.c` | Control core, shared with the dashboard sim |
+| `Tests/test_control.c` | PC test for the PID and the calculations |
+| `Tests/test_core.c` | PC test for the control core (heading and wheel behavior) |
+| `Tests/test_heading.c` | PC test for the BNO085 side of the heading |
+| `Tests/replay.c` | Firmware-side replay, used by the dashboard equivalence test |
 | `Drivers/` | STM32 HAL, CMSIS, and board drivers |
 | `John_Deere_Tractor.ioc` | STM32CubeMX configuration |
 | `CMakePresets.json` | Debug and Release build presets |
@@ -121,4 +136,4 @@ These parts keep the licenses of their owners: `Drivers/` and the generated file
 ## Verification status
 
 The firmware compiles and links for the STM32H533 with the GCC ARM compiler. It is not tested on the hardware.
-The PC test in `John_Deere_Tractor/Tests/test_control.c` passes. It tests the calculations only.
+The PC tests in `John_Deere_Tractor/Tests/` pass. They test the calculations and the control logic only. The command to run each test is at the top of its file.

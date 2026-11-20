@@ -231,5 +231,10 @@ void TIM6_IRQHandler(void)
 }
 
 /* USER CODE BEGIN 1 */
-
+/* Bluetooth module link (main.c, bt_init). Only the interrupt transmission uses it. */
+extern UART_HandleTypeDef huart_bt;
+void USART1_IRQHandler(void)
+{
+  HAL_UART_IRQHandler(&huart_bt);
+}
 /* USER CODE END 1 */

@@ -15,6 +15,9 @@ void sim_steering(Control *c, float raw_yaw, float yaw_zero, uint32_t count, uin
   control_steering(c, &s);
 }
 
+/* Sim route runner only: set the heading goal, as a route step in the firmware would do. */
+void sim_set_heading_goal(Control *c, float deg) { c->heading_goal = wrap180(deg); }
+
 /* constants.h values as compiled, for the dashboard display and the sim plant. */
 #define CONFIG(X) \
   X(WHEEL_CONTROL_PERIOD_MS) X(STEERING_CONTROL_PERIOD_MS) X(TELEMETRY_PERIOD_MS) X(COMMAND_TIMEOUT_MS) \
@@ -27,7 +30,9 @@ void sim_steering(Control *c, float raw_yaw, float yaw_zero, uint32_t count, uin
   X(ENC_DIR_RIGHT) X(MOTOR_NO_LOAD_RPM_12V) X(WHEEL_DIAMETER_MM) X(TRACK_WIDTH_MM) X(WHEELBASE_MM) \
   X(SIM_MOTOR_GAIN) X(SIM_MOTOR_TAU_S) X(SIM_SERVO_RATE_DEG_S) X(SIM_SERVO_TAU_S) X(SIM_WHEELBASE_MM) \
   X(SIM_TRACK_WIDTH_MM) X(SIM_IMU_PHASE_MS) X(TOF_MAX_RANGE_MM) \
-  X(SIM_TOF_FRONT_HEIGHT_MM) X(SIM_TOF_SIDE_LOW_HEIGHT_MM) X(SIM_TOF_SIDE_HIGH_HEIGHT_MM)
+  X(SIM_TOF_FRONT_HEIGHT_MM) X(SIM_TOF_SIDE_LOW_HEIGHT_MM) X(SIM_TOF_SIDE_HIGH_HEIGHT_MM) \
+  X(AVOID_STOP_MM) X(AVOID_WAIT_S) X(AVOID_BACK_MM) X(AVOID_SWERVE_DEG) X(AVOID_MARGIN_MM) \
+  X(AVOID_MAX_OFFSET_MM) X(AVOID_LOOK_MM) X(AVOID_PCT)
 #define CONFIG_NAME(n)  #n " "
 #define CONFIG_VALUE(n) (double)(n),
 const char   config_names[]  = CONFIG(CONFIG_NAME);

@@ -1,6 +1,6 @@
 # Tractor dashboard
 
-Python standard library + one local HTML canvas page. No packages, cloud service, build step, or firmware changes. Serial support is macOS/Linux. Run only one control tab and close other serial terminals.
+Python standard library + one local HTML canvas page. No packages or cloud service. The sim needs a C compiler (`cc`; on macOS: `xcode-select --install`), because it runs the firmware control core. Serial support is macOS/Linux. Run only one control tab and close other serial terminals.
 
 ## Run
 
@@ -39,7 +39,7 @@ Source: `John_Deere_Tractor/` in this repository, inspected November 11, 2026.
 - MCU: STM32H533RET6; COM1 = USART2, PA2 TX / PA3 RX for `USE_NUCLEO_H533RE`.
 - 115200 baud, 8 data bits, no parity, 1 stop bit, no flow control. The comment mentioning “7-bit data” is misleading; the configured word length is 8B with no parity.
 - Input is one raw ASCII character, no newline needed: W/S direction; A/D ±5°; 1…9 = 10…90%; 0 = 100%; Space stops and centers. Both letter cases accepted.
-- Every valid character refreshes `t_last_key`. Thus steering or digit traffic can keep an earlier drive command alive. Invalid characters do not refresh it.
+- Only W and S refresh `t_last_key`. Steering, digit and invalid characters do not keep a drive command alive.
 - 10 Hz CRLF text output, parsed exactly, including optional `STALL`, `IMU-FAIL` or `IMU-STALE`:
 
 ```text
@@ -52,7 +52,7 @@ There are no timestamps, raw cumulative counts, measured steering angle, X/Y pos
 
 ## Timeout and geometry
 
-The MCU cannot observe keyboard release: a terminal sends characters, not key-up events. After 300 ms without **any valid key**, `drive_dir` becomes zero. The next 100 Hz wheel updates ramp the target toward zero at 1000 RPM/s: from 200 RPM this takes about another 200 ms, or about 500 ms from the last key, plus loop delays. At the default 20 RPM target the ramp takes about 20 ms. Space calls `motors_stop()` immediately when read, zeroing target/output and resetting PI, without the ramp. The main loop can still be delayed by blocking IMU reads/printing. Physical braking/coasting depends on mechanics and the driver.
+The MCU cannot observe keyboard release: a terminal sends characters, not key-up events. After 300 ms without **a W or S key**, `drive_dir` becomes zero. The next 100 Hz wheel updates ramp the target toward zero at 1000 RPM/s: from 200 RPM this takes about another 200 ms, or about 500 ms from the last key, plus loop delays. At the default 20 RPM target the ramp takes about 20 ms. Space calls `motors_stop()` immediately when read, zeroing target/output and resetting PI, without the ramp. The main loop can still be delayed by blocking IMU reads/printing. Physical braking/coasting depends on mechanics and the driver.
 
 For wheelbase L, rear track T, equivalent center steering angle δ:
 
@@ -72,19 +72,19 @@ All values below are current values in `App/Config/constants.h`; replace TBD val
 
 | Configuration | Current | Action |
 |---|---|---|
-| `WHEEL_DIAMETER_MM`, `TRACK_WIDTH_MM`, `WHEELBASE_MM` | 0 / 0 / 0 | Measure loaded wheel diameter, rear wheel-center track, axle spacing. Required for useful physical geometry. |
+| `WHEEL_DIAMETER_MM`, `TRACK_WIDTH_MM`, `WHEELBASE_MM` | 65 / 0 / 0 | Diameter measured. Measure the rear wheel-center track and the axle spacing. |
 | `SERVO_MIN_US`, `SERVO_CENTER_US`, `SERVO_MAX_US` | 1000 / 1500 / 2000 | Calibrate center and mechanical-safe pulse limits. |
 | `SERVO_MAX_STEER_DEG`, `SERVO_DIR` | 30°, +1 | Measure actual steering vs pulse and confirm positive means left. |
 | `ENC_PULSES_PER_MOTOR_REV`, `ENC_EDGES_COUNTED`, `GEAR_RATIO` | 16 / 4 / 50 | Assumed 3200 counts/wheel revolution; verify with ten turns and confirm `ENC_DIR_LEFT/RIGHT` (both +1). |
-| `WHEEL_KP`, `WHEEL_KI` | 0 / 0 | Wheel PI is presently inactive; tune from measurements. |
+| `WHEEL_KP`, `WHEEL_KI`, `WHEEL_KD` | 0.4 / 6.5 / 0 | From a model of the left motor with the wheel in the air. Retune on the ground. |
 | `WHEEL_FF_PCT_PER_RPM` | 0.5 | Estimate based on 200 RPM no-load at 12 V; calibrate loaded response and actual supply. |
 | `WHEEL_SPEED_MAX_RPM` | 200 | Set a verified loaded limit below no-load speed; update dashboard speed labels if changed. |
 | `MOTOR_DEADBAND_PCT`, `MOTOR_DUTY_MAX` | 0 / 100 | Measure minimum useful duty and safe maximum. |
 | `WHEEL_ACCEL_RPM_PER_S`, `WHEEL_DECEL_RPM_PER_S` | 200 / 1000 | Tune ramp behavior; release in this dashboard uses Space and bypasses it. |
 | `COMMAND_TIMEOUT_MS` | 300 | Keep as link-loss fallback; shortening it does not provide key-up detection. |
 | `STALL_TIMEOUT_MS`, `STALL_MIN_DUTY` | 300 ms / 30 | Verify against loaded motor/encoder behavior. Low commands below 30 do not trigger this stall detection. |
-| `STEER_STEP_DEG` | 5° | Per A/D byte; dashboard uses one byte per press. |
-| `HEADING_HOLD_ENABLE`, `HEADING_SOURCE` | 0 / Game RV | Direct steering now. Keep disabled until yaw/servo signs and heading gains are calibrated; gains are all zero. If enabled, A/D change heading target, so update UI instructions. |
+| `STEER_STEP_DEG` | 10° | Per A/D byte when heading hold is off. |
+| `HEADING_HOLD_ENABLE`, `HEADING_SOURCE` | 1 / Game RV | A/D change the heading target by `HEADING_STEP_DEG` (30°). Gains 0.6 / 0.5 / 0.5 and `HEADING_D_FILTER_TAU_S` 0.05 s are not tested on the car; confirm the yaw and servo signs first. |
 | `WHEEL_CONTROL_PERIOD_MS`, `STEERING_CONTROL_PERIOD_MS`, `TELEMETRY_PERIOD_MS` | 10 / 20 / 100 ms | TIM6 supplies wheel sampling; changing wheel period requires matching `.ioc`/timer setup. |
 
 Encoder migration is already represented in this source: TIM2 PA0/PA1 and TIM3 PA6/PA7, x4, sampled by TIM6. At 3200 counts/rev and 10 ms, one count = 1.875 RPM before integer telemetry truncation. Timer counting avoids per-edge software interrupts but still depends on electrical signal quality/filter configuration. Motor PWM is TIM8 PC6–PC9 at 20 kHz; servo is TIM1 PA8 at 50 Hz. No pin edits or code regeneration were necessary for the dashboard.
@@ -96,6 +96,8 @@ For future firmware work, consider a separate stop-only command if release shoul
 ```sh
 PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s . -v
 ```
+
+`ReplayTests` compiles `John_Deere_Tractor/Tests/replay.c` (BNO085 struct, `heading_hold_sample()`, control core) and checks that the same 3000 ms input sequence gives a bit-identical controller state on the firmware side and through the dashboard. `SimTests` check that the dashboard calls the C core and has no Python controller. Both builds here use the PC compiler: the STM32 compiler can give small float differences.
 
 Tests cover exact parsing and flags, malformed inputs, command sequencing/release, watchdog stop, estimated distance and stale gaps, real POSIX pseudo-terminal fragmented serial reads/writes, and demo stopping. Browser verification covers the responsive display, a 5° steering step, holding drive, rear trails and zero output/center on release. Hardware behavior remains unverified.
 
@@ -125,6 +127,29 @@ Or run `python3 dashboard.py` for simulation only. The existing `--port` command
 
 A small blinking green **LIVE** dot appears only when valid serial frames are less than 500 ms old and there is no serial error. It becomes **NO DATA** when stale, or **OFFLINE** when the browser loses the server. Sim is always labeled **SIM**, with simulated telemetry.
 
+The sim has no controller of its own. It compiles the firmware control core (`App/Control/control.c`, `pid.c`, `math_utils.c`, with `constants.h`) into `build/control-<hash>.so` and calls it through `control_binding.c` (ctypes), in the order of the main loop of `main.c`, once per simulated millisecond. Python supplies only fake sensors (encoder counters, BNO085 reports at 10 ms read every 5 ms) and the assumed plant: servo lag and rate limit, first-order motors and a kinematic bicycle. The **Active config** panel shows the values the C code was compiled with; orange values are `SIM_` assumptions, not measurements. Telemetry shows the steering **command** and the simulated **actual** angle separately.
+
+When you save a control source or `constants.h`, the sim rebuilds the core and **restarts the controller as after a reflash** (all PID state, targets and ramps from the start state; heading zero = present heading). The simulated car keeps its pose and wheel speeds. If the code does not compile, the dashboard shows the compiler message and the old build keeps running. `WHEELBASE_MM` and `TRACK_WIDTH_MM` are 0: the controller uses 0 (no rear speed difference), as the firmware does, and only the simulated car uses `SIM_WHEELBASE_MM` / `SIM_TRACK_WIDTH_MM`. The sim does not predict the stability of the real tractor.
+
 WASD, Space and digits now work even when the speed dropdown is focused. Digits 1–9 select 10–90%; only 0 selects 100%. Space sends a one-time stop and releases its visual highlight on key-up. It no longer stays latched and blocks later speed updates. Held keys show a highlight. A/D remain 5° per press, matching the existing firmware protocol; W/S are held to drive.
 
 After updating, stop an older server with Ctrl+C, start the new one, and reload the browser. Do not run two instances against the same serial device.
+
+## Track editor and distance sensors (Sim only)
+
+**Top view** shows the whole track: mouse wheel = zoom at the pointer, drag on empty space (Move tool) = pan, **Fit** = whole track again; **Follow car** is the old view. The tool bar (top view only):
+
+| Tool | Use |
+| --- | --- |
+| Move | (Top view only, as all tools.) Click an object to select it, drag to move it. The selected object shows yellow handles: drag a wall point, a box corner (resize) or the circle edge (radius). Its values also appear as editable rows in metres (Apply or Cmd+Enter). Drag the car to put it somewhere else. Delete / Backspace removes the selected object. |
+| Wall | Drag: one straight wall. |
+| Box | Drag a rectangle; a click gives a 30 cm square. |
+| Circle | Drag the radius; a click gives a 15 cm radius. |
+| Checkpoint | Click = position, drag = heading (a click uses the heading of the car). A dashed ghost car shows the pose. Label from the Label field (or C1, C2, ...). |
+| Start | Click = position, drag = heading. **Reset sim** puts the car here, and this heading becomes the heading zero. |
+
+**Z** (or Cmd/Ctrl+Z, or Undo) reverts the last track change, up to 100 steps. Car moves are not track changes.
+
+**Height m** sets the height of new objects, or of the selected object. Each edit is saved at once to `track.json` (next to `dashboard.py`). Without that file the dashboard loads a default track traced from the drawing from the map with the measured lengths (40 m top edge, 139 m outline; `PX_PER_M` in `dashboard.py`). The red line, the gate and the start area come from the drawing, at estimated places. The inner outline is 0.01 m high: lower than every sensor, so no sensor sees it. The real size is not known.
+
+The three VL53L1X sensors of `distance.h` are drawn as beams of length `TOF_MAX_RANGE_MM`: blue = no target, red = target (dashed = right high). A sensor sees an object only when the object is at least as high as the sensor (`SIM_TOF_*_HEIGHT_MM` in `constants.h`: assumed mount heights). The readings are 2D rays: no beam width (the real sensor has about 27°), no noise, no reflectance limits. The car does not collide with objects.

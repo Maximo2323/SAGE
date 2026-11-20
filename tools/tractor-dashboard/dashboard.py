@@ -87,6 +87,7 @@ class ControlLib:
         lib.control_wheels.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint16, ctypes.c_uint16, ctypes.c_uint32]
         lib.sim_steering.argtypes = [ctypes.c_void_p, ctypes.c_float, ctypes.c_float, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_int]
         lib.control_view.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_double)]
+        lib.sim_set_heading_goal.argtypes = [ctypes.c_void_p, ctypes.c_float]
         for name in ('wrap180', 'wrap360'):
             getattr(lib, name).argtypes, getattr(lib, name).restype = [ctypes.c_float], ctypes.c_float
         lib.deadband_map.argtypes, lib.deadband_map.restype = [ctypes.c_float] * 3, ctypes.c_float
@@ -222,6 +223,339 @@ def save_world(world, path=None):
     return world
 
 
+ROUTE_FILE = Path(__file__).with_name('route.json')
+SENSORS = ('front', 'right_low', 'right_high')  # the order of SimCar.tof()
+STEP_FIELDS = {  # step type: numeric field -> (min, max)
+    'drive': {'m': (-100, 100), 'speed': (10, 100)},
+    'turn': {'deg': (-360, 360), 'speed': (10, 100)},
+    'find': {'mm': (0, 4000), 'tol': (0, 4000), 'max': (.1, 100), 'speed': (10, 100), 'hold': (0, 4000), 'kp': (0, 1), 'after': (0, 100)},
+    'checkpoint': {'s': (0, 60)},
+    'align': {'m': (-100, 100), 'speed': (10, 100)}}
+TOF_PERIOD_MS = 50  # TOF_INTER_MEASUREMENT_MS: a new ToF reading this often
+ALIGN_PCT = 10      # speed of the back-and-forward align at the end of a find step
+STEP_OPTIONAL = {'hold': 0, 'kp': .05, 'after': 0}  # route files from before wall following
+HOLD_MAX_DEG = 20   # the most the wall-following P control turns away from the route heading
+# Car body and ToF mounts, as fractions of the wheelbase L (forward from the rear axle) and the track T.
+# ASSUMED: measure them on the car. index.html draws the same body.
+FRONT_X = 1.18                  # front sensor, on the center line
+SIDE_X, SIDE_Y = .5, .34        # the two right sensors: SIDE_Y T right of the center line
+BODY_FRONT, BODY_REAR, HALF_W = 1.184, .183, .34  # body front / rear (behind the axle) / half width
+
+
+def validate_route(steps):
+    """route.json and POST /route: a list of known steps with numbers in range."""
+    if not isinstance(steps, list) or len(steps) > 100:
+        raise ValueError('Invalid route')
+    clean = []
+    for s in steps:
+        if not isinstance(s, dict) or s.get('type') not in STEP_FIELDS:
+            raise ValueError('Invalid route step')
+        out = {'type': s['type']}
+        for k, (lo, hi) in STEP_FIELDS[s['type']].items():
+            v = s.get(k, STEP_OPTIONAL.get(k))
+            if type(v) not in (int, float) or not lo <= v <= hi:  # NaN fails this too
+                raise ValueError(f'Step {len(clean) + 1} {s["type"]}: {k} must be {lo} to {hi}')
+            if k == 'speed' and v % 10:  # the firmware takes 10 % steps (keys 1..9, 0)
+                raise ValueError(f'Step {len(clean) + 1} {s["type"]}: speed must be 10, 20 ... 100')
+            out[k] = v
+        if s['type'] == 'find':
+            if s.get('sensor') not in SENSORS or s.get('until') not in ('seen', 'lost'):
+                raise ValueError(f'Step {len(clean) + 1} find: invalid sensor or until')
+            out['sensor'], out['until'] = s['sensor'], s['until']
+            if out['hold'] and out['sensor'] == 'front':
+                raise ValueError(f'Step {len(clean) + 1} find: hold works with a side sensor only')
+        if s['type'] in ('checkpoint', 'align'):
+            if not isinstance(s.get('label'), str) or len(s['label']) > 24:
+                raise ValueError(f'Step {len(clean) + 1} {s["type"]}: invalid label')
+            out['label'] = s['label']
+        clean.append(out)
+    return clean
+
+
+def load_route(path=None):
+    try:
+        return validate_route(json.loads(Path(path or ROUTE_FILE).read_text()))
+    except FileNotFoundError:
+        return []
+
+
+def save_route(steps, path=None):
+    steps = validate_route(steps)
+    path = Path(path or ROUTE_FILE)
+    tmp = path.with_suffix('.tmp')
+    tmp.write_text(json.dumps(steps, indent=1))
+    os.replace(tmp, path)
+    return steps
+
+
+def edge_to_checkpoint(sim, cp, find):
+    """Metres from the edge where `find` stops to checkpoint cp, + = forward. Searches the line through the
+    checkpoint along its heading, so it assumes the car comes to the checkpoint straight along that heading.
+    None: no such edge within the max distance of the find step."""
+    yaw, idx = math.radians(cp['yaw']), SENSORS.index(find['sensor'])
+    want = find['until'] == 'seen'  # the state just after the edge, in the travel direction
+
+    def inside(s):
+        mm = sim.tof((cp['x'] + s * math.cos(yaw), cp['y'] + s * math.sin(yaw), cp['yaw']))[idx]['mm']
+        return mm >= 0 and abs(mm - find['mm']) <= find['tol']
+    limit, best = int(min(find['max'], 50) * 1000), None
+    prev = inside(-limit)
+    for s in range(-limit + 5, limit + 1, 5):  # 5 mm steps: about the align precision of a find step
+        cur = inside(s)
+        if cur == want and prev != want and (best is None or abs(s) < abs(best)):
+            best = s
+        prev = cur
+    return None if best is None else -best / 1000
+
+
+class Route:
+    """Sim only: runs the route steps through the firmware interface: W/S, speed digits and Space as keys,
+    and the heading goal (a firmware route runner would set it the same way). It decides from wheel distance,
+    the controller's IMU heading and the ToF readings, never from the true pose. The true pose is used only
+    to report the error at a checkpoint."""
+
+    def __init__(self, steps, first=0, loop=False):
+        self.steps, self.log, self.loop, self.lap = steps, [], loop and bool(steps), 1
+        self.i, self.begun, self.running = first, False, True
+        self.heading = self.t_start = None  # route heading goal, deg from the start heading
+        self.dir = self.t_key = 0
+        self.speed_key = self.edge = None
+        self.offset = 0.  # deg added to the route heading by wall following
+        self.avoid, self.avoid_off = None, 0.  # avoidance phase; deg it adds to the route heading
+
+    def say(self, sim, text):
+        self.log = (self.log + [f'{sim.now / 1000:6.1f} s  {text}'])[-100:]
+
+    @staticmethod
+    def odo(sim):
+        """Distance, mm, + forward. The sim wheel turns: the encoders give the same to one count."""
+        return sum(sim.wheel_pos) / 2 * math.pi * sim.c['WHEEL_DIAMETER_MM']
+
+    def go(self, sim, direction, pct):
+        key = str(int(pct) // 10 % 10)
+        if key != self.speed_key:
+            sim.keys.append(key)
+            self.speed_key = key
+        if direction != self.dir or sim.now - self.t_key >= 100:  # W/S again before COMMAND_TIMEOUT_MS
+            sim.keys.append('w' if direction > 0 else 's')
+            self.dir, self.t_key = direction, sim.now
+
+    def finish(self, sim, text):
+        self.say(sim, f'{self.i + 1} {self.steps[self.i]["type"]}: {text}')
+        sim.keys.append(' ')  # Space: zero output now. It also sets the heading goal to the yaw; step() sets it again.
+        self.dir, self.i, self.begun = 0, self.i + 1, False
+
+    def fail(self, sim, text):
+        self.finish(sim, 'FAILED, ' + text)
+        self.running = False
+
+    def report(self, sim, s):
+        reads = ' / '.join(str(t['mm']) for t in sim.tof())
+        cp = next((o for o in sim.world['objects'] if o['type'] == 'checkpoint' and o.get('label') == s['label']), None)
+        if cp is None:
+            return self.say(sim, f'{self.i + 1} checkpoint "{s["label"]}": not on the track. ToF F/RL/RH {reads} mm')
+        expect = ' / '.join(str(t['mm']) for t in sim.tof((cp['x'], cp['y'], cp['yaw'])))
+        self.say(sim, f'{self.i + 1} checkpoint {s["label"]}: off by {math.hypot(sim.x - cp["x"], sim.y - cp["y"]) / 10:.1f} cm, '
+                      f'{sim.lib.wrap180(sim.yaw - cp["yaw"]):+.1f} deg. ToF F/RL/RH {reads} mm (at the checkpoint: {expect})')
+
+    def step(self, sim):
+        """Once per simulated ms, before the main loop reads its key."""
+        if not self.running or sim.keys:
+            return
+        v = sim.view()
+        if self.heading is None:
+            self.heading, self.t_start, self.o0 = v['heading_goal'], sim.now, self.odo(sim)
+        sim.lib.sim_set_heading_goal(sim.ctl, self.heading + self.offset + self.avoid_off)
+        if not self.begun:
+            if max(map(abs, sim.rpm)) > .5:  # each step starts with the car stopped
+                return
+            if self.i >= len(self.steps):
+                if self.loop:  # again from step 1, from where the car is now
+                    self.say(sim, f'lap {self.lap} done at {(sim.now - self.t_start) / 1000:.1f} s')
+                    self.i, self.lap = 0, self.lap + 1
+                    return
+                self.running = False
+                return self.say(sim, f'route done in {(sim.now - self.t_start) / 1000:.1f} s')
+            s = self.steps[self.i]
+            self.begun, self.s0, self.t0, self.offset = True, self.odo(sim), sim.now, 0.
+            self.lat = self.fwd = 0.  # mm left of / along the line of this step, from wheel distance and IMU
+            self.last, self.avoid, self.avoid_off = self.s0, None, 0.
+            self.t_mm = sim.now - TOF_PERIOD_MS  # read the sensors at once
+            if self.i == 0 or self.steps[self.i - 1]['type'] != 'find':
+                self.edge = None  # Align uses the edge only right after its Find
+            self.phase = 'arm' if s['type'] == 'find' and s['until'] == 'lost' else 'seek'
+            if s['type'] == 'turn':
+                self.heading = sim.lib.wrap180(self.heading + s['deg'])
+            if s['type'] == 'checkpoint':
+                self.report(sim, s)
+        odo, angle = self.odo(sim), math.radians(sim.lib.wrap180(v['current_yaw'] - self.heading))
+        self.lat += (odo - self.last) * math.sin(angle)
+        self.fwd += (odo - self.last) * math.cos(angle)
+        self.last = odo
+        self.fresh = sim.now - self.t_mm >= TOF_PERIOD_MS  # a new ToF reading this ms
+        if self.fresh:
+            self.t_mm, self.mm = sim.now, [t['mm'] for t in sim.tof()]
+        s = self.steps[self.i]
+        if self.avoid or (self.dir > 0 and (s['type'] == 'drive' or s['type'] == 'find' and s['sensor'] != 'front')
+                          and 0 <= self.mm[0] < sim.c['AVOID_STOP_MM']):
+            return self.avoiding(sim, angle)
+        moved = self.fwd if s['type'] in ('drive', 'find') else odo - self.s0  # drive/find: progress along the line
+        if s['type'] == 'drive':
+            if abs(moved) >= abs(s['m']) * 1000:
+                return self.finish(sim, f'{moved / 1000:.2f} m')
+            self.go(sim, 1 if s['m'] > 0 else -1, s['speed'])
+        elif s['type'] == 'turn':
+            if abs(sim.lib.wrap180(self.heading - v['current_yaw'])) < 2:
+                return self.finish(sim, f'heading {v["current_yaw"]:.1f} deg after {moved / 1000:.2f} m')
+            if abs(moved) > 20000:
+                return self.fail(sim, 'no turn after 20 m (IMU?)')
+            self.go(sim, 1, s['speed'])  # Ackermann: the car must roll to turn
+        elif s['type'] == 'align':  # drive from the edge to the checkpoint, stop, then report the error
+            moved = self.odo(sim) - (self.s0 if self.edge is None else self.edge)
+            if self.phase == 'seek':
+                left = abs(s['m']) * 1000 - abs(moved)
+                if left > 0:  # the last 100 mm at ALIGN_PCT: less coasting after the stop
+                    return self.go(sim, 1 if s['m'] > 0 else -1, s['speed'] if left > 100 else ALIGN_PCT)
+                sim.keys.append(' ')
+                self.dir, self.phase = 0, 'settle'
+            elif max(map(abs, sim.rpm)) <= .5:
+                self.report(sim, s)
+                self.finish(sim, f'{moved / 1000:.2f} m from the edge')
+        elif s['type'] == 'checkpoint':
+            if sim.now - self.t0 >= s['s'] * 1000:
+                self.finish(sim, f'waited {s["s"]} s')
+        else:
+            self.find(sim, s, moved, angle)
+
+    def avoiding(self, sim, angle):
+        """Obstacle ahead. Stop and wait AVOID_WAIT_S: gone = go on. Still there = go around on the left.
+        All positions in the frame of the step line: fwd along it, off to its left, from wheel distance and IMU.
+        reverse: straight back until the car front is AVOID_BACK_MM from the obstacle face (an Ackermann car
+                 needs room to move sideways).
+        out:  swerve +AVOID_SWERVE_DEG. Each front hit is a point of the obstacle: lateral = off + r sin(angle),
+              forward = fwd + r cos(angle). Keep the leftmost (edge) and nearest (face). Go on until the front is
+              clear and off >= edge + half car + margin. Right front corner within margin of the face = no room: fail.
+        pass: parallel, until the right sensors lose it + rear overhang (sensor to car rear) + margin.
+        back: swerve -AVOID_SWERVE_DEG to the line. straight: on until the heading is within 3 deg of the line.
+        New obstacle in pass or back: stop, wait; still there = new face, reverse again; the edge keeps the
+        leftmost point of both, the return is to the first line."""
+        c = sim.c
+        front, sample, L, W, a = self.mm[0], self.fresh, sim.wheelbase, HALF_W * sim.track, angle
+        r = FRONT_X * L + front  # rear axle to the hit point, along the car axis
+        if self.avoid is None:
+            self.avoid, self.av_t, self.av_lat0, self.offset = 'wait', sim.now, self.lat, 0.
+            self.av_face, self.av_edge = self.fwd + r * math.cos(a), 0.
+            sim.keys.append(' ')
+            self.dir = 0
+            return self.say(sim, f'{self.i + 1} obstacle at {front} mm: stop and wait')
+        off = self.lat - self.av_lat0  # mm left of the line where the obstacle was met
+        corner_fwd = self.fwd + BODY_FRONT * L * math.cos(a) + W * math.sin(a)   # right front corner of the body
+        corner_off = off + BODY_FRONT * L * math.sin(a) - W * math.cos(a)
+        gap = self.av_face - corner_fwd
+        if self.avoid == 'wait':
+            if sample and not 0 <= front < c['AVOID_STOP_MM'] + 100:
+                self.avoid = None
+                return self.say(sim, f'{self.i + 1} obstacle gone')
+            if sim.now - self.av_t >= c['AVOID_WAIT_S'] * 1000:
+                self.avoid = 'reverse'
+                self.say(sim, f'{self.i + 1} obstacle still there: back up, then go around on the left')
+            return
+        if self.avoid == 'reverse':
+            if gap < c['AVOID_BACK_MM']:
+                return self.go(sim, -1, c['AVOID_PCT'])
+            self.avoid = 'out'
+        if self.avoid == 'out':
+            self.avoid_off = c['AVOID_SWERVE_DEG']
+            hit = 0 <= front <= c['AVOID_LOOK_MM']
+            if sample and hit:
+                self.av_edge = max(self.av_edge, off + r * math.sin(a))
+                self.av_face = min(self.av_face, self.fwd + r * math.cos(a))
+            target = self.av_edge + W + c['AVOID_MARGIN_MM']
+            if target > c['AVOID_MAX_OFFSET_MM']:
+                return self.fail(sim, f'obstacle needs more than {c["AVOID_MAX_OFFSET_MM"] / 1000:g} m to the left')
+            if not hit and off >= target:
+                self.avoid, self.avoid_off, self.av_mark, self.av_seen = 'pass', 0., self.fwd, False
+                return self.say(sim, f'{self.i + 1} {off:.0f} mm left of the line: passing')
+            if gap < c['AVOID_MARGIN_MM'] and corner_off < self.av_edge + c['AVOID_MARGIN_MM']:
+                return self.fail(sim, f'no room to go around: edge {self.av_edge:.0f} mm left of the line')
+            return self.go(sim, 1, c['AVOID_PCT'])
+        if self.avoid in ('pass', 'back', 'straight') and sample and 0 <= front < c['AVOID_STOP_MM']:
+            self.av_resume, self.av_t, self.avoid = self.avoid, sim.now, 'wait2'
+            sim.keys.append(' ')
+            self.dir = 0
+            return self.say(sim, f'{self.i + 1} new obstacle at {front} mm during the detour: stop and wait')
+        if self.avoid == 'wait2':
+            if sample and not 0 <= front < c['AVOID_STOP_MM'] + 100:
+                self.avoid = self.av_resume
+                return self.say(sim, f'{self.i + 1} it is gone: continue the detour')
+            if sim.now - self.av_t >= c['AVOID_WAIT_S'] * 1000:  # part of the same obstacle: same detour again
+                self.av_face, self.avoid = self.fwd + r * math.cos(a), 'reverse'
+                self.say(sim, f'{self.i + 1} still there: back up and go around both')
+            return
+        if self.avoid == 'pass':
+            if self.fwd + SIDE_X * L < self.av_face:  # side sensors not beside it yet
+                self.av_mark = self.fwd
+            if any(0 <= m <= off for m in self.mm[1:]):  # right sensors: something nearer than the line
+                self.av_mark, self.av_seen = self.fwd, True
+            # the car rear is behind the side sensors; never seen = 1 m past the face
+            if self.fwd - self.av_mark < ((SIDE_X + BODY_REAR) * L + c['AVOID_MARGIN_MM'] if self.av_seen else 1000):
+                return self.go(sim, 1, c['AVOID_PCT'])
+            self.avoid = 'back'
+            self.say(sim, f'{self.i + 1} passed: back to the line')
+        if self.avoid == 'back':
+            self.avoid_off = -c['AVOID_SWERVE_DEG']
+            # straighten early: turning back from the swerve at full lock still moves R (1 - cos) sideways
+            lead = L / math.tan(math.radians(c['SERVO_MAX_STEER_DEG'])) * (1 - math.cos(math.radians(c['AVOID_SWERVE_DEG'])))
+            if off > lead:
+                return self.go(sim, 1, c['AVOID_PCT'])
+            self.avoid, self.avoid_off = 'straight', 0.
+        if abs(math.degrees(a)) > 3:  # straight: heading back along the line before the step goes on
+            return self.go(sim, 1, c['AVOID_PCT'])
+        self.avoid = None
+        self.say(sim, f'{self.i + 1} back on the line')
+
+    def find(self, sim, s, moved, angle):
+        """Drive until the reading enters (seen) or leaves (lost) mm +- tol. Then, when faster than ALIGN_PCT,
+        back over that edge and come up to it again at ALIGN_PCT: the stop is at the edge, not at the coast.
+        The reading is corrected to the distance square to the object: reading x cos(yaw - route heading).
+        It assumes the object runs parallel to the route heading.
+        hold > 0: while the object is seen, P control on the heading keeps the corrected reading at hold.
+        after > 0: no back-and-forward; drive on `after` m from where the edge was read, then stop.
+        max limits only the search for the edge."""
+        if self.phase != 'after' and abs(moved) > s['max'] * 1000:
+            return self.fail(sim, f'no "{s["until"]}" edge within {s["max"]} m')
+        if self.fresh:
+            raw = self.mm[SENSORS.index(s['sensor'])]
+            self.reading = round(raw * math.cos(angle)) if raw >= 0 else -1
+            self.inside = self.reading >= 0 and abs(self.reading - s['mm']) <= s['tol']
+            following = s['hold'] and self.inside and self.phase in ('arm', 'seek', 'after')
+            # right-side sensor: too far (reading > hold) = turn right = negative degrees
+            self.offset = clamp(-s['kp'] * (self.reading - s['hold']), -HOLD_MAX_DEG, HOLD_MAX_DEG) if following else 0.
+        edge = self.inside == (s['until'] == 'seen')
+        if self.phase == 'arm':  # 'lost': see the object first
+            if not self.inside:
+                return self.go(sim, 1, s['speed'])
+            self.phase = 'seek'
+        if self.phase == 'seek':
+            if not edge:
+                return self.go(sim, 1, s['speed'])
+            self.edge = self.odo(sim)  # shortcut: read every 50 ms, so up to speed x 50 ms late; measure the lag on the car
+            self.phase = 'after' if s['after'] else 'back' if s['speed'] > ALIGN_PCT else 'creep'
+        if self.phase == 'after':
+            left = s['after'] * 1000 - (self.odo(sim) - self.edge)
+            if left > 0:  # the last 100 mm at ALIGN_PCT: less coasting after the stop
+                return self.go(sim, 1, s['speed'] if left > 100 else ALIGN_PCT)
+            return self.finish(sim, f'{s["after"]} m after the edge, {s["sensor"]} {self.reading} mm')
+        if self.phase == 'back':
+            if edge:
+                return self.go(sim, -1, ALIGN_PCT)
+            self.phase = 'creep'
+        if not edge:
+            return self.go(sim, 1, ALIGN_PCT)
+        self.edge = self.odo(sim)  # Align measures from here, not from where the car stops after it coasts
+        self.finish(sim, f'{s["sensor"]} {self.reading} mm, {moved / 1000:.2f} m')
+
+
 def segments(world, min_height_m):
     """Outline segments of every object at least min_height_m high."""
     for o in world['objects']:
@@ -289,15 +623,20 @@ class SimCar:
         self.wheel_pos = [0., 0.]        # wheel revolutions, for the encoder counters
         self.seq = 0
         self.keys = []
+        self.route = None                # sim only: a running Route
         # Fake BNO085 (Game Rotation Vector): raw heading -180..180, report count, handling time
         self.imu_raw = self.imu_first = self.imu_raw_next = 0.
         self.imu_count = self.imu_resets = self.imu_t = self.imu_pending = 0
         self.imu_reset_zero = 0
         start = next((o for o in self.world['objects'] if o['type'] == 'start'), None)
         if start:  # before boot(): the heading zero is the start heading, as after a calibration there
-            self.x, self.y, self.yaw = start['x'], start['y'], start['yaw']
-            self.imu_raw = self.imu_raw_next = self.imu_first = ((self.yaw + 180) % 360) - 180
+            self.place(start['x'], start['y'], start['yaw'])
         self.load()
+
+    def place(self, x, y, yaw):
+        """Put the car at x, y (mm), yaw (deg) with the IMU reading that heading. boot() after it = power-on there."""
+        self.x, self.y, self.yaw = x, y, yaw
+        self.imu_raw = self.imu_raw_next = self.imu_first = ((yaw + 180) % 360) - 180
 
     def load(self):
         """Build the core when a source file changed. A new build = a new firmware flash: the controller
@@ -368,6 +707,8 @@ class SimCar:
     def loop(self):
         """One main-loop pass of main.c at self.now, then 1 ms of plant."""
         lib, ctl, now, c = self.lib, self.ctl, self.now % 2**32, self.c
+        if self.route:
+            self.route.step(self)
         if self.keys:                    # the firmware reads one key per loop
             lib.control_key(ctl, self.keys.pop(0).encode(), now)
         lib.control_tick(ctl, now)
@@ -419,19 +760,21 @@ class SimCar:
         for _ in range(steps):
             self.loop()
 
-    def tof(self):
+    def tof(self, pose=None):
         """The three VL53L1X of distance.h: front, right low, right high. 2D ray, no beam width, no noise.
-        ASSUMED mounts: front = front of the body; right = middle of the right side."""
+        ASSUMED mounts: front = front of the body; right = middle of the right side.
+        pose = (x mm, y mm, yaw deg) of the rear axle; default: the car."""
         c, L = self.c, self.wheelbase
-        mounts = (('front', 1.18 * L, 0., 0., c['SIM_TOF_FRONT_HEIGHT_MM']),
-                  ('right_low', .5 * L, -.34 * self.track, -90., c['SIM_TOF_SIDE_LOW_HEIGHT_MM']),
-                  ('right_high', .5 * L, -.34 * self.track, -90., c['SIM_TOF_SIDE_HIGH_HEIGHT_MM']))
-        yaw, out = math.radians(self.yaw), []
+        px, py, pyaw = pose or (self.x, self.y, self.yaw)
+        mounts = (('front', FRONT_X * L, 0., 0., c['SIM_TOF_FRONT_HEIGHT_MM']),
+                  ('right_low', SIDE_X * L, -SIDE_Y * self.track, -90., c['SIM_TOF_SIDE_LOW_HEIGHT_MM']),
+                  ('right_high', SIDE_X * L, -SIDE_Y * self.track, -90., c['SIM_TOF_SIDE_HIGH_HEIGHT_MM']))
+        yaw, out = math.radians(pyaw), []
         for name, fx, fy, angle, height in mounts:
-            x = self.x + fx * math.cos(yaw) - fy * math.sin(yaw)
-            y = self.y + fx * math.sin(yaw) + fy * math.cos(yaw)
-            mm = ray_distance(self.world, x, y, self.yaw + angle, height / 1000, c['TOF_MAX_RANGE_MM'])
-            out.append(dict(name=name, x=x, y=y, angle=self.yaw + angle, height_mm=height,
+            x = px + fx * math.cos(yaw) - fy * math.sin(yaw)
+            y = py + fx * math.sin(yaw) + fy * math.cos(yaw)
+            mm = ray_distance(self.world, x, y, pyaw + angle, height / 1000, c['TOF_MAX_RANGE_MM'])
+            out.append(dict(name=name, x=x, y=y, angle=pyaw + angle, height_mm=height,
                             mm=-1 if mm is None else int(mm)))  # -1 = no target, as the firmware telemetry
         return out
 
@@ -464,8 +807,6 @@ class Robot:
         self.sim = SimCar(world=world) if demo else None
         if demo:
             self.pose = [self.sim.x, self.sim.y, math.radians(self.sim.yaw)]
-        self.token = secrets.token_urlsafe(24)
-        self.closed = False
 
     def send(self, keys):
         if self.serial and not self.demo:
@@ -562,23 +903,21 @@ class Robot:
                                     **{k: v[k] for k in ('heading_target', 'current_yaw', 'heading_error', 'heading_out')},
                                     heading_integral=v['pid_heading.integral'], heading_deriv=v['pid_heading.deriv'],
                                     tof=self.sim.tof())
+                route = self.sim.route
+                if route:
+                    odo, v = Route.odo(self.sim), self.sim.view()
+                    state['route'] = dict(step=route.i, running=route.running, log=route.log[-40:],
+                                          total_m=(odo - getattr(route, 'o0', odo)) / 1000,
+                                          step_m=(odo - route.s0) / 1000 if route.begun else 0,
+                                          heading=v['current_yaw'], tof=[t['mm'] for t in self.sim.tof()],
+                                          offset_m=route.lat / 1000 if route.begun else 0, avoid=route.avoid)
+                else:
+                    state['route'] = None
+                state['checkpoints'] = [dict(x=o['x'], y=o['y'], tof=[t['mm'] for t in self.sim.tof((o['x'], o['y'], o['yaw']))])
+                                        for o in self.sim.world['objects'] if o['type'] == 'checkpoint']
             else:
                 state['config'], state['config_error'] = compiled_config(sources_mtime())  # flashed firmware can differ
             return state
-
-    def run(self):
-        before = time.monotonic()
-        while not self.closed:
-            now = time.monotonic()
-            try:
-                self.tick(now, now-before)
-            except OSError as exc:
-                with self.lock:
-                    self.error = str(exc)
-                    self.drive = ''
-                return
-            before = now
-            time.sleep(.1 if self.demo else .01)
 
 
 class Dashboard:
@@ -590,6 +929,8 @@ class Dashboard:
         self.lock = threading.RLock()
         self.token = secrets.token_urlsafe(24)
         self.world = load_world()
+        self.route = load_route()
+        self.sim_speed = 1  # x faster than real time while a route runs
         self.robot = Robot(demo=True, geometry=[100, 300, 220], world=self.world)
         self.generation = 0
         self.closed = False
@@ -624,6 +965,62 @@ class Dashboard:
             if self.robot.demo:
                 self.robot.sim.world = self.world
 
+    def set_route(self, steps):
+        with self.lock:
+            self.route = save_route(steps)
+
+    def run_route(self, payload):
+        """run true: Reset sim (car at the start, controller restarted), then run route.json. false: stop it.
+        from = index of a checkpoint step: power the car on at that checkpoint, run the steps after it."""
+        if (not isinstance(payload, dict) or not {'run'} <= set(payload) <= {'run', 'from', 'loop'}
+                or type(payload['run']) is not bool or type(payload.get('loop', False)) is not bool):
+            raise ValueError('Invalid run request')
+        with self.lock:
+            if payload['run']:
+                first, cp = 0, None
+                if 'from' in payload:
+                    i = payload['from']
+                    if type(i) is not int or not 0 <= i < len(self.route) or self.route[i]['type'] != 'checkpoint':
+                        raise ValueError('Not a checkpoint step')
+                    cp = next((o for o in self.world['objects'] if o['type'] == 'checkpoint'
+                               and o.get('label') == self.route[i]['label']), None)
+                    if cp is None:
+                        raise ValueError(f'No checkpoint "{self.route[i]["label"]}" on the track')
+                    first = i + 1
+                self.switch('sim')
+                if cp:
+                    sim = self.robot.sim
+                    sim.place(cp['x'], cp['y'], cp['yaw'])
+                    sim.boot()
+                    self.robot.pose = [sim.x, sim.y, math.radians(sim.yaw)]
+                self.robot.sim.route = Route(self.route, first, payload.get('loop', False))
+            elif self.robot.demo and self.robot.sim.route:
+                self.robot.sim.route.running = False
+                self.robot.sim.keys.append(' ')
+
+    def set_speed(self, payload):
+        if not isinstance(payload, dict) or set(payload) != {'x'} or payload['x'] not in (1, 2, 4, 8):
+            raise ValueError('Speed must be 1, 2, 4 or 8')
+        with self.lock:
+            self.sim_speed = payload['x']
+
+    def align_distance(self, payload):
+        """Align step i: the distance from the edge of the find step before it to its checkpoint, from the map."""
+        with self.lock:
+            i = payload.get('i') if isinstance(payload, dict) else None
+            if type(i) is not int or not 0 <= i < len(self.route) or self.route[i]['type'] != 'align':
+                raise ValueError('Not an align step')
+            if not self.robot.demo:
+                raise ValueError('Switch to Sim first')
+            find = next((s for s in reversed(self.route[:i]) if s['type'] == 'find'), None)
+            cp = next((o for o in self.world['objects'] if o['type'] == 'checkpoint' and o.get('label') == self.route[i]['label']), None)
+            if find is None or cp is None:
+                raise ValueError('Align needs a Find step before it and a checkpoint with its label')
+            m = edge_to_checkpoint(self.robot.sim, cp, find)
+            if m is None:
+                raise ValueError(f'No {find["until"]} edge for {find["sensor"]} {find["mm"]} ± {find["tol"]} mm on the line through the checkpoint')
+            return round(m, 3)
+
     def move_car(self, payload):
         with self.lock:
             if not self.robot.demo:
@@ -641,11 +1038,14 @@ class Dashboard:
         with self.lock:
             if type(generation) is not int or generation != self.generation:
                 raise ValueError('Mode changed; reload controls')
+            route = self.robot.demo and self.robot.sim.route
+            if route and route.running and state.get('stop') is not True:
+                raise ValueError('Route running: press ■ Stop first')
             self.robot.command(state)
 
     def snapshot(self):
         with self.lock:
-            return dict(self.robot.snapshot(), generation=self.generation,
+            return dict(self.robot.snapshot(), generation=self.generation, sim_speed=self.sim_speed,
                         live_available=bool(self.port))
 
     def run(self):
@@ -655,7 +1055,9 @@ class Dashboard:
             with self.lock:
                 if not self.robot.error:
                     try:
-                        self.robot.tick(now, min(now-before, .1))
+                        route = self.robot.demo and self.robot.sim.route
+                        # only while a route runs: manual W/S at x4 would miss COMMAND_TIMEOUT_MS in sim time
+                        self.robot.tick(now, min(now-before, .1) * (self.sim_speed if route and route.running else 1))
                     except OSError as exc:
                         self.robot.error = str(exc)
                         self.robot.drive = ''
@@ -703,16 +1105,18 @@ def handler(robot):
                 self.reply(200, robot.snapshot())
             elif self.path == '/world':
                 self.reply(200, robot.world)
+            elif self.path == '/route':
+                self.reply(200, robot.route)
             else:
                 self.reply(404, {'error': 'Not found'})
 
         def do_POST(self):
-            if not self.valid_host() or self.path not in ('/control', '/mode', '/world', '/pose') or self.headers.get('X-Control-Token') != robot.token:
+            if not self.valid_host() or self.path not in ('/control', '/mode', '/world', '/pose', '/route', '/run', '/align', '/speed') or self.headers.get('X-Control-Token') != robot.token:
                 self.reply(403, {'error': 'Forbidden'})
                 return
             try:
                 size = int(self.headers.get('Content-Length', '0'))
-                if not 0 < size < (262144 if self.path == '/world' else 512):
+                if not 0 < size < (262144 if self.path in ('/world', '/route') else 512):
                     raise ValueError('Invalid body length')
                 payload = json.loads(self.rfile.read(size))
                 if self.path == '/mode':
@@ -723,6 +1127,15 @@ def handler(robot):
                     robot.set_world(payload)
                 elif self.path == '/pose':
                     robot.move_car(payload)
+                elif self.path == '/route':
+                    robot.set_route(payload)
+                elif self.path == '/run':
+                    robot.run_route(payload)
+                elif self.path == '/speed':
+                    robot.set_speed(payload)
+                elif self.path == '/align':
+                    self.reply(200, {'m': robot.align_distance(payload)})
+                    return
                 else:
                     robot.command(payload)
                 self.reply(200, {'ok': True})
