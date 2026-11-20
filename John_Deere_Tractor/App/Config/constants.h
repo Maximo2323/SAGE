@@ -148,6 +148,19 @@
 #define SERVO_MAX_STEER_DEG       30.0f   /* TBD */
 #define SERVO_DIR                 1.0f    /* TBD: +1 or -1. A positive angle must steer left. */
 
+/* --- Route obstacle avoidance: used by the dashboard sim route runner; a firmware route runner needs the same.
+ * Front reading < AVOID_STOP_MM: stop, wait AVOID_WAIT_S. Still there: reverse until the car front is
+ * AVOID_BACK_MM from it, swerve left AVOID_SWERVE_DEG until the car is AVOID_MARGIN_MM past its left edge,
+ * pass it (+ AVOID_MARGIN_MM after it), swerve back to the line. ===== TBD: set on site. ===== */
+#define AVOID_STOP_MM             700.0f   /* front reading closer than this = obstacle */
+#define AVOID_WAIT_S              6.0f     /* wait for a temporary obstacle, then go around */
+#define AVOID_BACK_MM             2500.0f  /* room in front before the swerve (it cannot move sideways) */
+#define AVOID_SWERVE_DEG          45.0f    /* heading change to swerve out and back */
+#define AVOID_MARGIN_MM           200.0f   /* clearance beside and after the obstacle */
+#define AVOID_MAX_OFFSET_MM       10000.0f  /* paved room to the left of the line: MEASURE IT */
+#define AVOID_LOOK_MM             3000.0f  /* a front hit farther than this is not the obstacle */
+#define AVOID_PCT                 30.0f    /* speed while going around, % */
+
 /* --- Sim only: the motor model of the dashboard sim. The firmware does not use these values. ---
  * ===== TBD: replace them with the values from the step test. ===== */
 #define SIM_MOTOR_GAIN            0.9f   /* real speed / speed that the feedforward expects */
