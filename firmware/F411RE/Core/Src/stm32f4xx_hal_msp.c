@@ -25,7 +25,7 @@
 /* USER CODE END Includes */
 
 /* USER CODE BEGIN 0 */
-/* NUCLEO-F411RE pin map. Compare with docs/PINOUT.md before you connect a wire.
+/* NUCLEO-F411RE pin map. Compare with docs/PINOUT_F411RE.md before you connect a wire.
  *   TIM3 CH1..CH4 : PC6, PC7, PC8, PC9  motor PWM          (AF2)
  *   TIM2 CH1, CH2 : PA0, PA1            left encoder       (AF1)
  *   TIM4 CH1, CH2 : PB6, PB7            right encoder      (AF2)
